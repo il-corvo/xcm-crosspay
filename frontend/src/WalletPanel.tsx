@@ -62,9 +62,10 @@ export function WalletPanel(props: { chain: ChainKey }) {
         const accs = await web3Accounts();
         if (cancelled) return;
 
-        const mapped = accs.map((a) => ({
+        type UiAccount = { address: string; name?: string };
+        const mapped: UiAccount[] = accs.map((a: any) => ({
           address: a.address,
-          name: a.meta?.name,
+          name: a.meta?.name as string | undefined,
         }));
         setAccounts(mapped);
         setSelected(mapped[0]?.address ?? "");
