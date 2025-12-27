@@ -119,11 +119,52 @@ export default function App() {
         throw new Error("Form is not safe/valid yet.");
       }
 
-      // Connect to Asset Hub RPC (same as WalletPanel list; keep it simple here)
-      const rpc = "wss://asset-hub-polkadot-rpc.dwellir.com";
-      setSubmitLog(`Connecting RPC: ${rpc}\n`);
+// Connect to Asset Hub RPC (defensive): 5 endpoints + timeout
+const RPCS = [
+  "wss://asset-hub-polkadot-rpc.dwellir.com",
+  "wss://polkadot-asset-hub-rpc.polkadot.io",
+  "wss://rpc-asset-hub-polkadot.luckyfriday.io",
+  "wss://asset-hub-polkadot-rpc.dwellir.com", // duplicate ok (sometimes different edge routing)
+  "wss://polkadot-asset-hub-rpc.polkadot.io", // duplicate ok
+];
 
-      const api = await ApiPromise.create({ provider: new WsProvider(rpc) });
+// small helper inside function (keeps scope local)
+const withTimeout = async <T,>(p: Promise<T>, ms: number): Promise<T> => {
+  return await new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error("RPC timeout")), ms);
+    p.then((v) => {
+      clearTimeout(t);
+      resolve(v);
+    }).catch((e) => {
+      clearTimeout(t);
+      reject(e);
+    });
+  });
+};
+
+let api: ApiPromise | null = null;
+let lastErr: any = null;
+
+setSubmitLog((s) => s + `Connecting to Asset Hub RPC (fallback mode)\n`);
+
+for (const rpc of RPCS) {
+  try {
+    setSubmitLog((s) => s + `→ Trying: ${rpc}\n`);
+    const provider = new WsProvider(rpc);
+    api = await withTimeout(ApiPromise.create({ provider }), 8000);
+    setSubmitLog((s) => s + `✅ Connected: ${rpc}\n`);
+    break;
+  } catch (e: any) {
+    lastErr = e;
+    setSubmitLog((s) => s + `✗ Failed: ${rpc} (${e?.message ?? String(e)})\n`);
+  }
+}
+
+if (!api) {
+  throw new Error(
+    `All Asset Hub RPC endpoints failed. Last error: ${lastErr?.message ?? String(lastErr)}`
+  );
+}
 
       // Inject signer from extension
       const injector = await web3FromAddress(selectedAddress);
