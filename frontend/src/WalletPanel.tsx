@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { web3Accounts, web3Enable } from "@polkadot/extension-dapp";
 import { ApiPromise, WsProvider } from "@polkadot/api";
 
-type ChainKey = "assethub" | "hydradx";
+export type ChainKey = "assethub" | "hydradx";
 
 const RPCS: Record<ChainKey, string[]> = {
   assethub: [
@@ -35,8 +35,17 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   });
 }
 
-export function WalletPanel(props: { chain: ChainKey }) {
-  const { chain } = props;
+export type WalletChainData = {
+  status: string;
+  balanceDot?: string;
+  edDot?: string;
+};
+
+export function WalletPanel(props: {
+  chain: ChainKey;
+  onChainData?: (d: WalletChainData) => void;
+}) {
+  const { chain, onChainData } = props;
 
   const [extEnabled, setExtEnabled] = useState(false);
   const [accounts, setAccounts] = useState<UiAccount[]>([]);
@@ -51,24 +60,29 @@ export function WalletPanel(props: { chain: ChainKey }) {
     [accounts, selected]
   );
 
-  // 1) Wallet enable + accounts
+  const setStatusN = (s: string) => {
+    setStatus(s);
+    onChainData?.({ status: s });
+  };
+
+  // 1) Enable wallet + load accounts
   useEffect(() => {
     let cancelled = false;
 
     async function run() {
-      setStatus("Connecting to wallet extension...");
+      setStatusN("Connecting to wallet extension...");
       try {
         const exts = await web3Enable("XCM CrossPay (Alpha)");
         if (cancelled) return;
 
         if (!exts || exts.length === 0) {
           setExtEnabled(false);
-          setStatus("No wallet extension authorized (or none installed).");
+          setStatusN("No wallet extension authorized (or none installed).");
           return;
         }
 
         setExtEnabled(true);
-        setStatus("Loading accounts...");
+        setStatusN("Loading accounts...");
 
         const accs = await web3Accounts();
         if (cancelled) return;
@@ -80,9 +94,9 @@ export function WalletPanel(props: { chain: ChainKey }) {
 
         setAccounts(mapped);
         setSelected(mapped[0]?.address ?? "");
-        setStatus(mapped.length ? "Wallet ready" : "No accounts found");
+        setStatusN(mapped.length ? "Wallet ready" : "No accounts found");
       } catch (e: any) {
-        setStatus(`Wallet error: ${e?.message ?? String(e)}`);
+        setStatusN(`Wallet error: ${e?.message ?? String(e)}`);
       }
     }
 
@@ -90,9 +104,10 @@ export function WalletPanel(props: { chain: ChainKey }) {
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 2) Chain RPC connect + balance subscribe
+  // 2) Connect RPC + read ED + subscribe balance (DOT)
   useEffect(() => {
     let api: ApiPromise | null = null;
     let unsub: (() => void) | undefined;
@@ -101,6 +116,7 @@ export function WalletPanel(props: { chain: ChainKey }) {
     async function loadBalance() {
       setBalance("-");
       setEd("-");
+      onChainData?.({ status: "Loading...", balanceDot: undefined, edDot: undefined });
 
       if (!selected) return;
 
@@ -111,12 +127,9 @@ export function WalletPanel(props: { chain: ChainKey }) {
 
         for (const url of rpcs) {
           try {
-            setStatus(`Connecting to ${chain} RPC: ${url}`);
-
+            setStatusN(`Connecting to ${chain} RPC: ${url}`);
             const provider = new WsProvider(url);
-            // timeout hard per non restare appesi
             api = await withTimeout(ApiPromise.create({ provider }), 8000);
-
             connected = true;
             break;
           } catch (e) {
@@ -125,29 +138,33 @@ export function WalletPanel(props: { chain: ChainKey }) {
         }
 
         if (!connected || !api) {
-          setStatus("All RPC endpoints failed.");
+          setStatusN("All RPC endpoints failed.");
           return;
         }
 
         if (cancelled) return;
 
-        setStatus("Connected. Reading balance...");
+        setStatusN("Connected. Reading balance...");
 
         // Existential deposit (ED)
         const edConst = api.consts.balances?.existentialDeposit?.toString?.();
         if (edConst) {
-          setEd(fmtPlanckToDot(BigInt(edConst)));
+          const edDot = fmtPlanckToDot(BigInt(edConst));
+          setEd(edDot);
+          onChainData?.({ status: "Connected. Reading balance...", edDot });
         }
 
-        // Subscribe to balance (avoid unused vars + TS strict)
+        // Subscribe balance
         unsub = (await api.query.system.account(selected, (info: any) => {
           const free = BigInt(info.data.free.toString());
-          setBalance(fmtPlanckToDot(free));
+          const balDot = fmtPlanckToDot(free);
+          setBalance(balDot);
+          onChainData?.({ status: "Live balance (read-only)", balanceDot: balDot });
         })) as unknown as () => void;
 
-        setStatus("Live balance (read-only)");
+        setStatusN("Live balance (read-only)");
       } catch (e: any) {
-        setStatus(`RPC error: ${e?.message ?? String(e)}`);
+        setStatusN(`RPC error: ${e?.message ?? String(e)}`);
       }
     }
 
@@ -162,6 +179,7 @@ export function WalletPanel(props: { chain: ChainKey }) {
         api?.disconnect();
       } catch {}
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chain, selected]);
 
   return (
@@ -178,8 +196,8 @@ export function WalletPanel(props: { chain: ChainKey }) {
 
       {!extEnabled && (
         <div style={{ marginBottom: 10, opacity: 0.8 }}>
-          Install/enable a Polkadot wallet extension (polkadot{".js"}, Talisman,
-          SubWallet, etc.) and authorize this site.
+          Install/enable a Polkadot wallet extension (polkadot{".js"}, Talisman, SubWallet, etc.)
+          and authorize this site.
         </div>
       )}
 
@@ -189,9 +207,7 @@ export function WalletPanel(props: { chain: ChainKey }) {
       {accounts.length > 0 && (
         <>
           <label>
-            <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>
-              Account
-            </div>
+            <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>Account</div>
             <select
               value={selected}
               onChange={(e) => setSelected(e.target.value)}
@@ -218,13 +234,12 @@ export function WalletPanel(props: { chain: ChainKey }) {
           </div>
 
           <div style={{ marginTop: 10, fontSize: 13, opacity: 0.7 }}>
-            ED warning: sending too much may drop the remaining balance below ED
-            and the account could be reaped on that chain.
+            ED warning: sending too much may drop the remaining balance below ED and the account could be
+            reaped on that chain.
           </div>
 
           <div style={{ marginTop: 12, fontSize: 13, opacity: 0.7 }}>
-            Selected: {selectedAccount?.name ?? "Account"} (
-            {selected.slice(0, 10)}…)
+            Selected: {selectedAccount?.name ?? "Account"} ({selected.slice(0, 10)}…)
           </div>
         </>
       )}
