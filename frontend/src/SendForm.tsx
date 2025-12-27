@@ -18,11 +18,27 @@ export function SendForm(props: {
   feeQuote: FeeQuote;
   safetyMsg: string;
   canSend: boolean;
+
   onDryRun: () => void;
   dryRun?: XcmDryRun;
+
+  // Real submit
+  canSubmitReal: boolean;
+  onSubmitReal: () => void;
+  submitHelp: string;
 }) {
-  const { value, onChange, feeQuote, safetyMsg, canSend, onDryRun, dryRun } =
-    props;
+  const {
+    value,
+    onChange,
+    feeQuote,
+    safetyMsg,
+    canSend,
+    onDryRun,
+    dryRun,
+    canSubmitReal,
+    onSubmitReal,
+    submitHelp,
+  } = props;
 
   const errors = validateRequest(value);
 
@@ -36,15 +52,11 @@ export function SendForm(props: {
         marginTop: 20,
       }}
     >
-      <h2 style={{ marginTop: 0 }}>Send (Phase 1 – dry-run)</h2>
+      <h2 style={{ marginTop: 0 }}>Send</h2>
 
-      {/* FORM */}
       <div style={{ display: "grid", gap: 12 }}>
-        {/* FROM */}
         <label>
-          <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>
-            From
-          </div>
+          <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>From</div>
           <select
             value={value.from}
             onChange={(e) =>
@@ -63,7 +75,6 @@ export function SendForm(props: {
           </select>
         </label>
 
-        {/* TO */}
         <label>
           <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>To</div>
           <select
@@ -84,11 +95,8 @@ export function SendForm(props: {
           </select>
         </label>
 
-        {/* ASSET */}
         <label>
-          <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>
-            Asset
-          </div>
+          <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>Asset</div>
           <select
             value={value.asset}
             onChange={(e) =>
@@ -107,32 +115,18 @@ export function SendForm(props: {
           </select>
         </label>
 
-        {/* AMOUNT */}
         <label>
-          <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>
-            Amount
-          </div>
+          <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>Amount</div>
           <input
             value={value.amount}
-            onChange={(e) =>
-              onChange({
-                ...value,
-                amount: e.target.value,
-              })
-            }
-            placeholder="e.g. 1.25"
+            onChange={(e) => onChange({ ...value, amount: e.target.value })}
+            placeholder="e.g. 0.05"
             inputMode="decimal"
-            style={{
-              width: "100%",
-              padding: 10,
-              borderRadius: 8,
-              border: "1px solid #ddd",
-            }}
+            style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #ddd" }}
           />
         </label>
       </div>
 
-      {/* FORM ERRORS */}
       {errors.length > 0 && (
         <div
           style={{
@@ -152,7 +146,6 @@ export function SendForm(props: {
         </div>
       )}
 
-      {/* FEES + SAFETY */}
       <div
         style={{
           marginTop: 14,
@@ -163,7 +156,6 @@ export function SendForm(props: {
         }}
       >
         <strong>Fees (estimate)</strong>
-
         <div style={{ marginTop: 8, display: "grid", gap: 4 }}>
           <div>Network fee (est): {feeQuote.networkFeeDotEst} DOT</div>
           <div>Service fee: {feeQuote.serviceFeeDot} DOT</div>
@@ -180,12 +172,9 @@ export function SendForm(props: {
           </ul>
         )}
 
-        <div style={{ marginTop: 10, fontSize: 13, opacity: 0.7 }}>
-          {safetyMsg}
-        </div>
+        <div style={{ marginTop: 10, fontSize: 13, opacity: 0.7 }}>{safetyMsg}</div>
       </div>
 
-      {/* DRY-RUN BUTTON */}
       <button
         disabled={!canSend}
         style={{
@@ -199,12 +188,29 @@ export function SendForm(props: {
         }}
         onClick={onDryRun}
       >
-        {canSend
-          ? "Preview XCM (dry-run)"
-          : "Fix fields / wallet safety to continue"}
+        {canSend ? "Preview XCM (dry-run)" : "Fix fields / wallet safety to continue"}
       </button>
 
-      {/* DRY-RUN PREVIEW */}
+      <button
+        disabled={!canSubmitReal}
+        style={{
+          marginTop: 10,
+          width: "100%",
+          padding: 12,
+          borderRadius: 10,
+          border: "1px solid #111",
+          background: canSubmitReal ? "#111" : "#777",
+          color: "#fff",
+          cursor: canSubmitReal ? "pointer" : "not-allowed",
+          opacity: canSubmitReal ? 1 : 0.7,
+        }}
+        onClick={onSubmitReal}
+      >
+        Submit (REAL) — DOT Asset Hub → HydraDX
+      </button>
+
+      <div style={{ marginTop: 8, fontSize: 13, opacity: 0.7 }}>{submitHelp}</div>
+
       {dryRun && (
         <div
           style={{
@@ -218,9 +224,7 @@ export function SendForm(props: {
           }}
         >
           <strong>XCM dry-run preview</strong>
-          <pre style={{ marginTop: 10 }}>
-            {JSON.stringify(dryRun, null, 2)}
-          </pre>
+          <pre style={{ marginTop: 10 }}>{JSON.stringify(dryRun, null, 2)}</pre>
         </div>
       )}
     </div>

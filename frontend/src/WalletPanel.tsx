@@ -44,8 +44,9 @@ export type WalletChainData = {
 export function WalletPanel(props: {
   chain: ChainKey;
   onChainData?: (d: WalletChainData) => void;
+  onSelectedAddress?: (addr: string) => void;
 }) {
-  const { chain, onChainData } = props;
+  const { chain, onChainData, onSelectedAddress } = props;
 
   const [extEnabled, setExtEnabled] = useState(false);
   const [accounts, setAccounts] = useState<UiAccount[]>([]);
@@ -65,7 +66,7 @@ export function WalletPanel(props: {
     onChainData?.({ status: s });
   };
 
-  // 1) Enable wallet + load accounts
+  // 1) Wallet enable + accounts
   useEffect(() => {
     let cancelled = false;
 
@@ -93,7 +94,10 @@ export function WalletPanel(props: {
         }));
 
         setAccounts(mapped);
-        setSelected(mapped[0]?.address ?? "");
+        const first = mapped[0]?.address ?? "";
+        setSelected(first);
+        if (first) onSelectedAddress?.(first);
+
         setStatusN(mapped.length ? "Wallet ready" : "No accounts found");
       } catch (e: any) {
         setStatusN(`Wallet error: ${e?.message ?? String(e)}`);
@@ -107,7 +111,12 @@ export function WalletPanel(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 2) Connect RPC + read ED + subscribe balance (DOT)
+  // Keep parent informed of selected address
+  useEffect(() => {
+    if (selected) onSelectedAddress?.(selected);
+  }, [selected, onSelectedAddress]);
+
+  // 2) Chain RPC connect + balance subscribe
   useEffect(() => {
     let api: ApiPromise | null = null;
     let unsub: (() => void) | undefined;
@@ -128,8 +137,10 @@ export function WalletPanel(props: {
         for (const url of rpcs) {
           try {
             setStatusN(`Connecting to ${chain} RPC: ${url}`);
+
             const provider = new WsProvider(url);
             api = await withTimeout(ApiPromise.create({ provider }), 8000);
+
             connected = true;
             break;
           } catch (e) {
@@ -146,7 +157,7 @@ export function WalletPanel(props: {
 
         setStatusN("Connected. Reading balance...");
 
-        // Existential deposit (ED)
+        // ED (existential deposit)
         const edConst = api.consts.balances?.existentialDeposit?.toString?.();
         if (edConst) {
           const edDot = fmtPlanckToDot(BigInt(edConst));
@@ -154,7 +165,7 @@ export function WalletPanel(props: {
           onChainData?.({ status: "Connected. Reading balance...", edDot });
         }
 
-        // Subscribe balance
+        // Subscribe to balance
         unsub = (await api.query.system.account(selected, (info: any) => {
           const free = BigInt(info.data.free.toString());
           const balDot = fmtPlanckToDot(free);
@@ -207,7 +218,9 @@ export function WalletPanel(props: {
       {accounts.length > 0 && (
         <>
           <label>
-            <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>Account</div>
+            <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>
+              Account
+            </div>
             <select
               value={selected}
               onChange={(e) => setSelected(e.target.value)}
