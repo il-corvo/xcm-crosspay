@@ -82,7 +82,7 @@ export function WalletPanel(props: { chain: ChainKey }) {
   }, []);
 
   useEffect(() => {
-    let unsub: (() => void) | null = null;
+    let unsub: (() => void) | undefined;
     let api: ApiPromise | null = null;
     let cancelled = false;
 
@@ -126,10 +126,14 @@ if (!connected || !api) {
         }
 
         // Subscribe to account balance
-        unsub = await api.query.system.account(selected, (info: any) => {
-          const free = BigInt(info.data.free.toString());
-          setBalance(fmtPlanckToDot(free));
-        });
+        const unsubscribe = await api.query.system.account(
+          selected,
+          (info: any) => {
+            const free = BigInt(info.data.free.toString());
+            setBalance(fmtPlanckToDot(free));
+
+         }
+       );
 
         setStatus("Live balance (read-only)");
       } catch (e: any) {
