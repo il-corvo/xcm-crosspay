@@ -1,4 +1,5 @@
-import type { FeeQuote, TransferRequest } from "../../xcm-engine/types";
+import type { TransferRequest, FeeQuote } from "../../xcm-engine/types";
+import type { XcmDryRun } from "../../xcm-engine/dryRun";
 import { validateRequest } from "../../xcm-engine/validate";
 
 const CHAINS = [
@@ -17,8 +18,11 @@ export function SendForm(props: {
   feeQuote: FeeQuote;
   safetyMsg: string;
   canSend: boolean;
+  onDryRun: () => void;
+  dryRun?: XcmDryRun;
 }) {
-  const { value, onChange, feeQuote, safetyMsg, canSend } = props;
+  const { value, onChange, feeQuote, safetyMsg, canSend, onDryRun, dryRun } =
+    props;
 
   const errors = validateRequest(value);
 
@@ -32,14 +36,23 @@ export function SendForm(props: {
         marginTop: 20,
       }}
     >
-      <h2 style={{ marginTop: 0 }}>Send (Phase 0)</h2>
+      <h2 style={{ marginTop: 0 }}>Send (Phase 1 – dry-run)</h2>
 
+      {/* FORM */}
       <div style={{ display: "grid", gap: 12 }}>
+        {/* FROM */}
         <label>
-          <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>From</div>
+          <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>
+            From
+          </div>
           <select
             value={value.from}
-            onChange={(e) => onChange({ ...value, from: e.target.value as TransferRequest["from"] })}
+            onChange={(e) =>
+              onChange({
+                ...value,
+                from: e.target.value as TransferRequest["from"],
+              })
+            }
             style={{ width: "100%", padding: 10, borderRadius: 8 }}
           >
             {CHAINS.map((c) => (
@@ -50,11 +63,17 @@ export function SendForm(props: {
           </select>
         </label>
 
+        {/* TO */}
         <label>
           <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>To</div>
           <select
             value={value.to}
-            onChange={(e) => onChange({ ...value, to: e.target.value as TransferRequest["to"] })}
+            onChange={(e) =>
+              onChange({
+                ...value,
+                to: e.target.value as TransferRequest["to"],
+              })
+            }
             style={{ width: "100%", padding: 10, borderRadius: 8 }}
           >
             {CHAINS.map((c) => (
@@ -65,11 +84,19 @@ export function SendForm(props: {
           </select>
         </label>
 
+        {/* ASSET */}
         <label>
-          <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>Asset</div>
+          <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>
+            Asset
+          </div>
           <select
             value={value.asset}
-            onChange={(e) => onChange({ ...value, asset: e.target.value as TransferRequest["asset"] })}
+            onChange={(e) =>
+              onChange({
+                ...value,
+                asset: e.target.value as TransferRequest["asset"],
+              })
+            }
             style={{ width: "100%", padding: 10, borderRadius: 8 }}
           >
             {ASSETS.map((a) => (
@@ -80,18 +107,32 @@ export function SendForm(props: {
           </select>
         </label>
 
+        {/* AMOUNT */}
         <label>
-          <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>Amount</div>
+          <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>
+            Amount
+          </div>
           <input
             value={value.amount}
-            onChange={(e) => onChange({ ...value, amount: e.target.value })}
+            onChange={(e) =>
+              onChange({
+                ...value,
+                amount: e.target.value,
+              })
+            }
             placeholder="e.g. 1.25"
             inputMode="decimal"
-            style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #ddd" }}
+            style={{
+              width: "100%",
+              padding: 10,
+              borderRadius: 8,
+              border: "1px solid #ddd",
+            }}
           />
         </label>
       </div>
 
+      {/* FORM ERRORS */}
       {errors.length > 0 && (
         <div
           style={{
@@ -111,6 +152,7 @@ export function SendForm(props: {
         </div>
       )}
 
+      {/* FEES + SAFETY */}
       <div
         style={{
           marginTop: 14,
@@ -143,6 +185,7 @@ export function SendForm(props: {
         </div>
       </div>
 
+      {/* DRY-RUN BUTTON */}
       <button
         disabled={!canSend}
         style={{
@@ -154,10 +197,32 @@ export function SendForm(props: {
           cursor: canSend ? "pointer" : "not-allowed",
           opacity: canSend ? 1 : 0.5,
         }}
-        onClick={() => alert("Coming soon: build XCM payload + submit")}
+        onClick={onDryRun}
       >
-        {canSend ? "Send (coming soon)" : "Fix fields / wallet safety to continue"}
+        {canSend
+          ? "Preview XCM (dry-run)"
+          : "Fix fields / wallet safety to continue"}
       </button>
+
+      {/* DRY-RUN PREVIEW */}
+      {dryRun && (
+        <div
+          style={{
+            marginTop: 20,
+            padding: 12,
+            borderRadius: 10,
+            background: "#0b0b0b",
+            color: "#e6e6e6",
+            fontSize: 13,
+            overflowX: "auto",
+          }}
+        >
+          <strong>XCM dry-run preview</strong>
+          <pre style={{ marginTop: 10 }}>
+            {JSON.stringify(dryRun, null, 2)}
+          </pre>
+        </div>
+      )}
     </div>
   );
 }
