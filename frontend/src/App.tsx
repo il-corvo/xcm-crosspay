@@ -9,6 +9,9 @@ import type { TransferRequest } from "../../xcm-engine/types";
 import { validateRequest } from "../../xcm-engine/validate";
 import { quoteFeesDot, DEFAULT_SERVICE_FEE } from "../../xcm-engine/fees";
 
+import { buildXcmDryRun } from "../../xcm-engine/dryRun";
+import type { XcmDryRun } from "../../xcm-engine/dryRun";
+
 export default function App() {
   const buildSha = import.meta.env.VITE_BUILD_SHA ?? "dev";
 
@@ -23,47 +26,61 @@ export default function App() {
     status: "Not connected",
   });
 
+  const [dryRun, setDryRun] = useState<XcmDryRun | undefined>(undefined);
+
   const errors = useMemo(() => validateRequest(req), [req]);
 
-  // Placeholder Phase 0: stima fissa fee di rete (poi la stimiamo via RPC/chain)
+  // Phase 0/1 placeholder: network fee estimate is fixed (we will do real estimation later)
   const networkFeeDotEst = 0.012;
 
   const amt = Number(req.amount || "0");
   const amtNum = Number.isFinite(amt) ? amt : 0;
 
-  // Service fee model: percent only on DOT sends; for USDC we use min clamp (for now).
+  // Service fee base:
+  // - If sending DOT: service fee is proportional to amount
+  // - If sending USDC: service fee uses min clamp (Phase 1 simplification)
   const amountForServiceFeeDot = req.asset === "DOT" ? amtNum : 0;
 
   const feeQuote = useMemo(() => {
-    const q = quoteFeesDot(amountForServiceFeeDot, networkFeeDotEst, DEFAULT_SERVICE_FEE);
+    const q = quoteFeesDot(
+      amountForServiceFeeDot,
+      networkFeeDotEst,
+      DEFAULT_SERVICE_FEE
+    );
     if (req.asset !== "DOT") {
-      q.notes = [...q.notes, "USDC transfer: service fee is currently min-clamped (Phase 0)."];
+      q.notes = [...q.notes, "USDC transfer: service fee is currently min-clamped (Phase 1)."];
     }
     return q;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [req.asset, amountForServiceFeeDot]);
 
+  // Wallet safety check (ED)
   const bal = Number(wallet.balanceDot ?? "NaN");
   const ed = Number(wallet.edDot ?? "NaN");
   const feeTotal = Number(feeQuote.totalFeeDot);
 
-  const hasWalletNums = Number.isFinite(bal) && Number.isFinite(ed) && Number.isFinite(feeTotal);
+  const hasWalletNums =
+    Number.isFinite(bal) && Number.isFinite(ed) && Number.isFinite(feeTotal);
 
   // Required DOT depends on asset:
-  // - if sending DOT: amount + fees
-  // - if sending USDC: fees only (still must keep ED)
-  const requiredDot = req.asset === "DOT" ? (amtNum + feeTotal) : feeTotal;
-  const remaining = hasWalletNums ? (bal - requiredDot) : NaN;
+  // - DOT transfer consumes DOT amount + DOT fees
+  // - USDC transfer consumes only DOT fees (still must keep ED on the selected "from" chain)
+  const requiredDot = req.asset === "DOT" ? amtNum + feeTotal : feeTotal;
 
-  const safe = hasWalletNums ? (remaining >= ed) : false;
+  const remaining = hasWalletNums ? bal - requiredDot : NaN;
+  const safe = hasWalletNums ? remaining >= ed : false;
 
   const safetyMsg = !hasWalletNums
     ? "Wallet data not ready yet."
     : safe
-      ? `OK: remaining ≈ ${remaining.toFixed(6)} DOT (ED ${ed}).`
-      : `Too much: would leave ≈ ${remaining.toFixed(6)} DOT (below ED ${ed}).`;
+    ? `OK: remaining ≈ ${remaining.toFixed(6)} DOT (ED ${ed}).`
+    : `Too much: would leave ≈ ${remaining.toFixed(6)} DOT (below ED ${ed}).`;
 
   const canSend = errors.length === 0 && safe;
+
+  const handleDryRun = () => {
+    const preview = buildXcmDryRun(req, feeQuote);
+    setDryRun(preview);
+  };
 
   return (
     <div style={{ maxWidth: 840, margin: "40px auto", padding: "0 16px" }}>
@@ -118,16 +135,24 @@ export default function App() {
 
       <SendForm
         value={req}
-        onChange={setReq}
+        onChange={(next) => {
+          setReq(next);
+          setDryRun(undefined); // clear preview when user changes input
+        }}
         feeQuote={feeQuote}
         safetyMsg={safetyMsg}
         canSend={canSend}
+        onDryRun={handleDryRun}
+        dryRun={dryRun}
       />
 
       <section style={{ marginTop: 28, opacity: 0.7 }}>
         <h2 style={{ marginBottom: 8 }}>Status</h2>
         <p style={{ margin: 0 }}>
-          UI is live. Wallet is connected. Next: XCM payload (dry-run) then submit.
+          Wallet is connected (read-only). Phase 1 supports transparent XCM dry-run preview.
+        </p>
+        <p style={{ marginTop: 10, marginBottom: 0 }}>
+          <b>Wallet status:</b> {wallet.status}
         </p>
         {errors.length > 0 && (
           <p style={{ marginTop: 10 }}>
@@ -139,7 +164,11 @@ export default function App() {
       <footer style={{ marginTop: 40, opacity: 0.6 }}>
         <p style={{ margin: 0 }}>
           Source:{" "}
-          <a href="https://github.com/il-corvo/xcm-crosspay" target="_blank" rel="noreferrer">
+          <a
+            href="https://github.com/il-corvo/xcm-crosspay"
+            target="_blank"
+            rel="noreferrer"
+          >
             GitHub (MIT)
           </a>
         </p>
