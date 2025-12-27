@@ -1,3 +1,5 @@
+
+import { SendForm } from "./SendForm";
 import "./App.css";
 
 export default function App() {
@@ -29,6 +31,7 @@ export default function App() {
 
       <section style={{ marginTop: 28 }}>
         <h2 style={{ marginBottom: 8 }}>Phase 0 scope</h2>
+        
         <ul>
           <li><b>Assets</b>: DOT, USDC (Asset Hub)</li>
           <li><b>Chains</b>: Asset Hub ↔ HydraDX</li>
@@ -36,7 +39,7 @@ export default function App() {
           <li><b>Fees</b>: network fees + service fee (0.15%, clamped)</li>
         </ul>
       </section>
-
+      <SendForm />
       <section style={{ marginTop: 28, opacity: 0.7 }}>
         <h2 style={{ marginBottom: 8 }}>Status</h2>
         <p style={{ margin: 0 }}>
