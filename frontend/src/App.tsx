@@ -1,8 +1,9 @@
-
+import { WalletPanel } from "./WalletPanel";
 import { SendForm } from "./SendForm";
 import "./App.css";
 
 export default function App() {
+  const buildSha = import.meta.env.VITE_BUILD_SHA ?? "dev";
   return (
     <div style={{ maxWidth: 840, margin: "40px auto", padding: "0 16px" }}>
       <header style={{ marginBottom: 24 }}>
@@ -39,6 +40,9 @@ export default function App() {
           <li><b>Fees</b>: network fees + service fee (0.15%, clamped)</li>
         </ul>
       </section>
+      {/* WALLET PANEL */}
+      <WalletPanel chain="assethub" />
+
       <SendForm />
       <section style={{ marginTop: 28, opacity: 0.7 }}>
         <h2 style={{ marginBottom: 8 }}>Status</h2>
@@ -58,6 +62,10 @@ export default function App() {
             GitHub (MIT)
           </a>
         </p>
+        <div style={{ marginTop: 10, fontSize: 12, opacity: 0.6 }}>
+          Build: {buildSha.slice(0, 7)}
+        </div>
+
       </footer>
     </div>
   );
