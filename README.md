@@ -111,6 +111,10 @@ Additional chains, improved routing, mobile-friendly signing (Vault / QR)
 - Iterate only where friction exists
 - Keep everything non-custodial and transparent
 
+> “Information wants to be free.”  
+> — Stewart Brand
+
+
 ---
 
 ## License
