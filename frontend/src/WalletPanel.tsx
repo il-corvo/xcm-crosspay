@@ -10,29 +10,38 @@ const RPCS: Record<ChainKey, string[]> = {
     "wss://polkadot-asset-hub-rpc.polkadot.io",
     "wss://rpc-asset-hub-polkadot.luckyfriday.io",
   ],
-  hydradx: [
-    "wss://rpc.hydradx.cloud",
-    "wss://hydradx-rpc.dwellir.com",
-  ],
+  hydradx: ["wss://rpc.hydradx.cloud", "wss://hydradx-rpc.dwellir.com"],
 };
 
+type UiAccount = { address: string; name?: string };
 
 function fmtPlanckToDot(planck: bigint, decimals = 10): string {
-  // Polkadot DOT has 10 decimals. This is a simple formatter.
   const s = planck.toString().padStart(decimals + 1, "0");
   const whole = s.slice(0, -decimals);
   const frac = s.slice(-decimals).replace(/0+$/, "");
   return frac ? `${whole}.${frac}` : whole;
 }
 
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error("RPC timeout")), ms);
+    p.then((v) => {
+      clearTimeout(t);
+      resolve(v);
+    }).catch((e) => {
+      clearTimeout(t);
+      reject(e);
+    });
+  });
+}
+
 export function WalletPanel(props: { chain: ChainKey }) {
   const { chain } = props;
 
   const [extEnabled, setExtEnabled] = useState(false);
-  const [accounts, setAccounts] = useState<{ address: string; name?: string }[]>(
-    []
-  );
+  const [accounts, setAccounts] = useState<UiAccount[]>([]);
   const [selected, setSelected] = useState<string>("");
+
   const [status, setStatus] = useState<string>("Not connected");
   const [balance, setBalance] = useState<string>("-");
   const [ed, setEd] = useState<string>("-");
@@ -42,6 +51,7 @@ export function WalletPanel(props: { chain: ChainKey }) {
     [accounts, selected]
   );
 
+  // 1) Wallet enable + accounts
   useEffect(() => {
     let cancelled = false;
 
@@ -56,17 +66,18 @@ export function WalletPanel(props: { chain: ChainKey }) {
           setStatus("No wallet extension authorized (or none installed).");
           return;
         }
-        setExtEnabled(true);
 
+        setExtEnabled(true);
         setStatus("Loading accounts...");
+
         const accs = await web3Accounts();
         if (cancelled) return;
 
-        type UiAccount = { address: string; name?: string };
         const mapped: UiAccount[] = accs.map((a: any) => ({
           address: a.address,
           name: a.meta?.name as string | undefined,
         }));
+
         setAccounts(mapped);
         setSelected(mapped[0]?.address ?? "");
         setStatus(mapped.length ? "Wallet ready" : "No accounts found");
@@ -81,59 +92,58 @@ export function WalletPanel(props: { chain: ChainKey }) {
     };
   }, []);
 
+  // 2) Chain RPC connect + balance subscribe
   useEffect(() => {
-    let unsub: (() => void) | undefined;
     let api: ApiPromise | null = null;
+    let unsub: (() => void) | undefined;
     let cancelled = false;
 
     async function loadBalance() {
       setBalance("-");
       setEd("-");
+
       if (!selected) return;
 
       const rpcs = RPCS[chain];
-      setStatus(`Connecting to ${chain} RPC...`);
 
       try {
-        // pick first rpc (Phase 0). Later we add fallback.
         let connected = false;
 
         for (const url of rpcs) {
           try {
             setStatus(`Connecting to ${chain} RPC: ${url}`);
+
             const provider = new WsProvider(url);
-            api = await ApiPromise.create({ provider });
+            // timeout hard per non restare appesi
+            api = await withTimeout(ApiPromise.create({ provider }), 8000);
+
             connected = true;
             break;
-      } catch (e) {
-        console.warn("RPC failed:", url, e);
-      }
-   }
+          } catch (e) {
+            console.warn("RPC failed:", url, e);
+          }
+        }
 
-if (!connected || !api) {
-  setStatus("All RPC endpoints failed.");
-  return;
-}
+        if (!connected || !api) {
+          setStatus("All RPC endpoints failed.");
+          return;
+        }
 
         if (cancelled) return;
 
-        setStatus(`Connected. Reading balance...`);
+        setStatus("Connected. Reading balance...");
 
-        // ED (existential deposit)
+        // Existential deposit (ED)
         const edConst = api.consts.balances?.existentialDeposit?.toString?.();
         if (edConst) {
           setEd(fmtPlanckToDot(BigInt(edConst)));
         }
 
-        // Subscribe to account balance
-        const unsubscribe = await api.query.system.account(
-          selected,
-          (info: any) => {
-            const free = BigInt(info.data.free.toString());
-            setBalance(fmtPlanckToDot(free));
-
-         }
-       );
+        // Subscribe to balance (avoid unused vars + TS strict)
+        unsub = (await api.query.system.account(selected, (info: any) => {
+          const free = BigInt(info.data.free.toString());
+          setBalance(fmtPlanckToDot(free));
+        })) as unknown as () => void;
 
         setStatus("Live balance (read-only)");
       } catch (e: any) {
@@ -213,11 +223,12 @@ if (!connected || !api) {
           </div>
 
           <div style={{ marginTop: 12, fontSize: 13, opacity: 0.7 }}>
-            Selected: {selectedAccount?.name ?? "Account"} ({selected.slice(0, 10)}
-            …)
+            Selected: {selectedAccount?.name ?? "Account"} (
+            {selected.slice(0, 10)}…)
           </div>
         </>
       )}
     </div>
   );
 }
+
