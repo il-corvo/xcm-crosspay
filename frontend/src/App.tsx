@@ -79,10 +79,14 @@ export default function App() {
   const [submitting, setSubmitting] = useState(false);
 
   // Step 1.1: guard - enforce from != to in state
-  const guardedReq = useMemo(() => {
-    if (req.from !== req.to) return req;
-    return { ...req, to: req.from === "assethub" ? "hydradx" : "assethub" };
-  }, [req]);
+const guardedReq = useMemo<TransferRequest>(() => {
+  if (req.from !== req.to) return req;
+
+  const nextTo: TransferRequest["to"] =
+    req.from === "assethub" ? "hydradx" : "assethub";
+
+  return { ...req, to: nextTo };
+}, [req]);
 
   const errors = useMemo(() => validateRequest(guardedReq), [guardedReq]);
 
