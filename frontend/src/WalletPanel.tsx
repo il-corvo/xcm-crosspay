@@ -38,8 +38,8 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 
 export type WalletChainData = {
   status: string;
-  balanceDot?: string; // (legacy name) actually "native balance" for selected chain
-  edDot?: string;      // (legacy name) actually "native ED" for selected chain
+  balanceDot?: string; // native free (per chain)
+  edDot?: string;      // native ED (per chain)
 };
 
 export function WalletPanel(props: {
@@ -60,8 +60,8 @@ export function WalletPanel(props: {
   const [nativeBal, setNativeBal] = useState<string>("-");
   const [nativeEd, setNativeEd] = useState<string>("-");
 
-  // Asset Hub USDC (assetId 1337)
-  const [usdcLabel, setUsdcLabel] = useState<string>("USDC (Asset Hub)");
+  // USDC on current chain (best-effort)
+  const [usdcLabel, setUsdcLabel] = useState<string>("USDC");
   const [usdcBal, setUsdcBal] = useState<string>("-");
 
   const selectedAccount = useMemo(
@@ -125,7 +125,7 @@ export function WalletPanel(props: {
     if (selected) onSelectedAddress?.(selected);
   }, [selected, onSelectedAddress]);
 
-  // 2) Connect RPC + subscribe balances
+  // 2) Connect RPC + subscribe native + subscribe USDC (best-effort)
   useEffect(() => {
     let api: ApiPromise | null = null;
 
@@ -166,14 +166,13 @@ export function WalletPanel(props: {
 
         if (cancelled) return;
 
-        // Native chain token + decimals (truth source)
         const dec = (api.registry.chainDecimals?.[0] ?? 10) as number;
         const tok = (api.registry.chainTokens?.[0] ?? "NATIVE") as string;
         setNativeSymbol(tok);
 
         setStatusN("Connected. Reading balances...");
 
-        // Native ED (balances pallet) formatted with chain decimals
+        // Native ED
         const edConst = api.consts.balances?.existentialDeposit?.toString?.();
         if (edConst) {
           const edInt = BigInt(edConst);
@@ -182,7 +181,7 @@ export function WalletPanel(props: {
           onChainData?.({ status: "Connected. Reading balances...", edDot: edFmt });
         }
 
-        // Subscribe native free balance (balances pallet)
+        // Subscribe native free balance
         unsubNative = (await api.query.system.account(selected, (info: any) => {
           const free = BigInt(info.data.free.toString());
           const balFmt = fmtIntWithDecimals(free, dec);
@@ -190,29 +189,28 @@ export function WalletPanel(props: {
           onChainData?.({ status: "Live balance (read-only)", balanceDot: balFmt });
         })) as unknown as () => void;
 
-        // Subscribe USDC only on Asset Hub (Assets pallet id 1337)
-        if (chain === "assethub") {
-          try {
-            const USDC_ID = 1337;
+        // Subscribe USDC best-effort on BOTH chains (Asset Hub and Hydra)
+        // We try pallet-assets assetId=1337. If chain doesn't support it, we keep '-'.
+        try {
+          const USDC_ID = 1337;
+          const who = decodeAddress(selected);
 
-            const md: any = await api.query.assets.metadata(USDC_ID);
-            const usdcDecimals = Number(md.decimals?.toString?.() ?? "6");
-            const symHuman = md.symbol?.toHuman?.();
-            const sym = typeof symHuman === "string" ? symHuman : "USDC";
-            setUsdcLabel(`${sym} (Asset Hub)`);
+          // metadata (symbol/decimals)
+          const md: any = await api.query.assets?.metadata?.(USDC_ID);
+          const usdcDecimals = Number(md?.decimals?.toString?.() ?? "6");
+          const symHuman = md?.symbol?.toHuman?.();
+          const sym = typeof symHuman === "string" ? symHuman : "USDC";
+          setUsdcLabel(chain === "assethub" ? `${sym} (Asset Hub)` : `${sym} (Hydra)`);
 
-            // IMPORTANT: pass AccountId32 bytes (robust across runtimes)
-            const who = decodeAddress(selected);
-
-            unsubUsdc = (await api.query.assets.account(USDC_ID, who, (acc: any) => {
-              const bal = BigInt(acc.balance.toString());
-              setUsdcBal(fmtIntWithDecimals(bal, usdcDecimals));
-            })) as unknown as () => void;
-          } catch (e) {
-            console.warn("USDC subscribe failed:", e);
-            setUsdcLabel("USDC (Asset Hub)");
-            setUsdcBal("-");
-          }
+          // account subscribe
+          unsubUsdc = (await api.query.assets.account(USDC_ID, who, (acc: any) => {
+            const bal = BigInt(acc.balance.toString());
+            setUsdcBal(fmtIntWithDecimals(bal, usdcDecimals));
+          })) as unknown as () => void;
+        } catch (e) {
+          console.warn("USDC subscribe (assets pallet) not available on this chain:", e);
+          setUsdcLabel(chain === "assethub" ? "USDC (Asset Hub)" : "USDC (Hydra)");
+          setUsdcBal("-");
         }
 
         setStatusN("Live balance (read-only)");
@@ -226,25 +224,17 @@ export function WalletPanel(props: {
     return () => {
       cancelled = true;
 
-      try {
-        if (unsubNative) unsubNative();
-      } catch {}
-
-      try {
-        if (unsubUsdc) unsubUsdc();
-      } catch {}
-
-      try {
-        api?.disconnect();
-      } catch {}
+      try { if (unsubNative) unsubNative(); } catch {}
+      try { if (unsubUsdc) unsubUsdc(); } catch {}
+      try { api?.disconnect(); } catch {}
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chain, selected]);
 
   const edHelp =
     chain === "assethub"
-      ? "ED matters for keeping the account alive on this chain. Keep a DOT buffer."
-      : "ED is chain-specific and refers to the chain native token (shown above).";
+      ? "ED matters for keeping the account alive on Asset Hub. Keep a DOT buffer."
+      : "ED is chain-specific and refers to the chain native token (shown above). Keep some for fees.";
 
   return (
     <div
@@ -260,8 +250,8 @@ export function WalletPanel(props: {
 
       {!extEnabled && (
         <div style={{ marginBottom: 10, opacity: 0.8 }}>
-          Install/enable a Polkadot wallet extension (polkadot{".js"}, Talisman, SubWallet, etc.) and
-          authorize this site.
+          Install/enable a Polkadot wallet extension (polkadot{".js"}, Talisman, SubWallet, etc.)
+          and authorize this site.
         </div>
       )}
 
@@ -286,29 +276,13 @@ export function WalletPanel(props: {
           </label>
 
           <div style={{ marginTop: 12, display: "grid", gap: 6 }}>
-            <div>
-              <b>Chain:</b> {chain}
-            </div>
-
-            <div>
-              <b>{nativeSymbol} (free):</b> {nativeBal}
-            </div>
-
-            <div>
-              <b>Existential Deposit (ED):</b> {nativeEd}{" "}
-              <span style={{ opacity: 0.6 }}>(native)</span>
-            </div>
-
-            {chain === "assethub" && (
-              <div>
-                <b>{usdcLabel}:</b> {usdcBal}
-              </div>
-            )}
+            <div><b>Chain:</b> {chain}</div>
+            <div><b>{nativeSymbol} (free):</b> {nativeBal}</div>
+            <div><b>Existential Deposit (ED):</b> {nativeEd} <span style={{ opacity: 0.6 }}>(native)</span></div>
+            <div><b>{usdcLabel}:</b> {usdcBal}</div>
           </div>
 
-          <div style={{ marginTop: 10, fontSize: 13, opacity: 0.7 }}>
-            {edHelp}
-          </div>
+          <div style={{ marginTop: 10, fontSize: 13, opacity: 0.7 }}>{edHelp}</div>
 
           <div style={{ marginTop: 12, fontSize: 13, opacity: 0.7 }}>
             Selected: {selectedAccount?.name ?? "Account"} ({selected.slice(0, 10)}…)
