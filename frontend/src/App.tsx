@@ -184,7 +184,7 @@ export default function App() {
           {
             id: {
               Concrete: {
-                parents: 1,
+                parents: 0,
                 interior: "Here",
               },
             },
