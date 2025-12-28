@@ -230,6 +230,41 @@ export default function App() {
           }
           setSubmitLog((s) => s + `❌ DispatchError: ${errMsg}\n`);
         }
+
+// --- XCM EVENTS DEBUG (truth source) ---
+try {
+  const lines: string[] = [];
+
+  for (const { event } of result.events) {
+    const sec = event.section;
+    const met = event.method;
+
+    if (
+      sec === "polkadotXcm" ||
+      sec === "xcmPallet" ||
+      sec === "xcmpQueue" ||
+      sec === "messageQueue" ||
+      sec === "dmpQueue"
+    ) {
+      lines.push(`${sec}.${met}: ${JSON.stringify(event.toHuman())}`);
+    }
+  }
+
+  if (lines.length > 0) {
+    setSubmitLog(
+      (s) =>
+        s +
+        `\n--- XCM events ---\n` +
+        lines.join("\n") +
+        `\n--- end ---\n`
+    );
+  }
+} catch (e) {
+  // ignore
+}
+
+
+
       });
     } catch (e: any) {
       setSubmitLog((s) => s + `❌ Error: ${e?.message ?? String(e)}\n`);
