@@ -29,13 +29,35 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   });
 }
 
+// Parse decimal string to integer (BigInt) with given decimals, NO float.
+// Examples: ("1.23", 6) => 1230000n
+function parseDecimalToInt(amount: string, decimals: number): bigint {
+  const s = (amount ?? "").trim();
+  if (!s) return 0n;
+
+  // allow "1", "1.", ".5", "0.5"
+  const m = s.match(/^(\d*)\.?(\d*)$/);
+  if (!m) return 0n;
+
+  const wholeStr = m[1] || "0";
+  const fracStrRaw = m[2] || "";
+
+  const fracStr = fracStrRaw.slice(0, decimals).padEnd(decimals, "0");
+
+  const whole = BigInt(wholeStr || "0");
+  const frac = BigInt(fracStr || "0");
+
+  const base = 10n ** BigInt(decimals);
+  return whole * base + frac;
+}
+
 export default function App() {
   const buildSha = import.meta.env.VITE_BUILD_SHA ?? "dev";
 
   const [req, setReq] = useState<TransferRequest>({
     from: "assethub",
     to: "hydradx",
-    asset: "DOT",
+    asset: "USDC_AH", // default to USDC for this phase
     amount: "",
   });
 
@@ -51,12 +73,15 @@ export default function App() {
 
   const errors = useMemo(() => validateRequest(req), [req]);
 
-  // Phase 1 placeholder: fixed network fee estimate
+  // Placeholder fee estimate in DOT (later: real estimation)
   const networkFeeDotEst = 0.012;
 
   const amt = Number(req.amount || "0");
   const amtNum = Number.isFinite(amt) ? amt : 0;
 
+  // Service fee base:
+  // - DOT send: proportional
+  // - USDC send: min clamp (Phase 1 simplification)
   const amountForServiceFeeDot = req.asset === "DOT" ? amtNum : 0;
 
   const feeQuote = useMemo(() => {
@@ -65,16 +90,13 @@ export default function App() {
       networkFeeDotEst,
       DEFAULT_SERVICE_FEE
     );
-    if (req.asset !== "DOT") {
-      q.notes = [
-        ...q.notes,
-        "USDC transfer: service fee is min-clamped (Phase 1).",
-      ];
+    if (req.asset === "USDC_AH") {
+      q.notes = [...q.notes, "USDC transfer: service fee is min-clamped (Phase 1)."];
     }
     return q;
   }, [req.asset, amountForServiceFeeDot]);
 
-  // Wallet safety check (ED)
+  // Wallet safety check (ED) - based on DOT balance on the FROM chain
   const bal = Number(wallet.balanceDot ?? "NaN");
   const ed = Number(wallet.edDot ?? "NaN");
   const feeTotal = Number(feeQuote.totalFeeDot);
@@ -82,7 +104,11 @@ export default function App() {
   const hasWalletNums =
     Number.isFinite(bal) && Number.isFinite(ed) && Number.isFinite(feeTotal);
 
+  // Required DOT depends on asset:
+  // - DOT: amount + fees
+  // - USDC: fees only (still must keep ED)
   const requiredDot = req.asset === "DOT" ? amtNum + feeTotal : feeTotal;
+
   const remaining = hasWalletNums ? bal - requiredDot : NaN;
   const safe = hasWalletNums ? remaining >= ed : false;
 
@@ -94,13 +120,13 @@ export default function App() {
 
   const canDryRun = errors.length === 0 && safe;
 
-  // Only support first real submit case
+  // ---- REAL SUBMIT SCOPE (now): USDC Asset Hub -> HydraDX ----
   const supportsRealSubmit =
     req.from === "assethub" &&
     req.to === "hydradx" &&
-    req.asset === "DOT" &&
+    req.asset === "USDC_AH" &&
     selectedAddress.length > 0 &&
-    amtNum > 0;
+    (req.amount ?? "").trim().length > 0;
 
   const canSubmitReal = canDryRun && supportsRealSubmit && !submitting;
 
@@ -108,21 +134,19 @@ export default function App() {
     setDryRun(buildXcmDryRun(req, feeQuote));
   };
 
-  // =========================
-  // REAL SUBMIT (Asset Hub -> HydraDX, DOT)
-  // =========================
-  async function submitReal_AssethubToHydraDot() {
+  async function submitReal_AssethubToHydra_USDC() {
     setSubmitLog("");
     setSubmitting(true);
 
     try {
       if (!supportsRealSubmit) {
-        throw new Error("Real submit supports only: DOT Asset Hub → HydraDX.");
+        throw new Error("Real submit currently supports: USDC (Asset Hub) → HydraDX.");
       }
       if (!canDryRun) {
         throw new Error("Form is not safe/valid yet.");
       }
 
+      // 5 RPC endpoints + timeout + logs
       const RPCS = [
         "wss://asset-hub-polkadot-rpc.dwellir.com",
         "wss://polkadot-asset-hub-rpc.polkadot.io",
@@ -163,7 +187,7 @@ export default function App() {
 
       const HYDRADX_PARA = 2034;
 
-      // XCM versioned V3 args (matches runtime expectations)
+      // dest: parachain HydraDX (parents: 1 from Asset Hub)
       const dest = {
         V3: {
           parents: 1,
@@ -171,7 +195,8 @@ export default function App() {
         },
       };
 
-      const id = decodeAddress(selectedAddress); // Uint8Array(32)
+      // beneficiary: AccountId32 on destination
+      const id = decodeAddress(selectedAddress);
       const beneficiary = {
         V3: {
           parents: 0,
@@ -183,22 +208,34 @@ export default function App() {
         },
       };
 
-      // Amount planck (DOT 10 decimals) - ok for alpha, later use decimal lib
-      const amountPlanck = BigInt(Math.floor(amtNum * 10 ** 10));
-      if (amountPlanck <= 0n) throw new Error("Amount too small.");
+      // USDC on Asset Hub: PalletInstance 50 (Assets) + GeneralIndex 1337
+      const USDC_ASSET_ID = 1337;
 
-      // IMPORTANT: DOT as local asset on Asset Hub => parents: 0, interior: Here
+      // Read decimals from chain metadata to convert amount safely
+      const md: any = await api.query.assets.metadata(USDC_ASSET_ID);
+      const decimals: number = Number(md.decimals?.toString?.() ?? "6");
+      const symbol: string = String(md.symbol?.toHuman?.() ?? "USDC");
+
+      setSubmitLog((s) => s + `Asset: ${symbol} (id ${USDC_ASSET_ID}, decimals ${decimals})\n`);
+
+      const amountInt = parseDecimalToInt(req.amount, decimals);
+      if (amountInt <= 0n) throw new Error("Amount too small (after decimals).");
+
+      // assets: VersionedAssets V3 with PalletInstance 50 / GeneralIndex 1337 (same as on-chain accepted tx)
       const assets = {
         V3: [
           {
+            fun: { Fungible: amountInt.toString() },
             id: {
               Concrete: {
                 parents: 0,
-                interior: "Here",
+                interior: {
+                  X2: {
+                    col0: { PalletInstance: 50 },
+                    col1: { GeneralIndex: String(USDC_ASSET_ID) },
+                  },
+                },
               },
-            },
-            fun: {
-              Fungible: amountPlanck.toString(),
             },
           },
         ],
@@ -217,29 +254,21 @@ export default function App() {
 
       setSubmitLog((s) => s + "Signing & submitting...\n");
 
-      // Guard to avoid double printing dispatchError on finalized, etc.
       let dispatchLogged = false;
 
       const unsub = await tx.signAndSend(selectedAddress, (result) => {
-        // status
         if (result.status.isInBlock) {
-          setSubmitLog(
-            (s) => s + `✅ In block: ${result.status.asInBlock.toString()}\n`
-          );
+          setSubmitLog((s) => s + `✅ In block: ${result.status.asInBlock.toString()}\n`);
         } else if (result.status.isFinalized) {
-          setSubmitLog(
-            (s) => s + `🎉 Finalized: ${result.status.asFinalized.toString()}\n`
-          );
-          try {
-            unsub();
-          } catch {}
+          setSubmitLog((s) => s + `🎉 Finalized: ${result.status.asFinalized.toString()}\n`);
+          try { unsub(); } catch {}
           api?.disconnect().catch(() => {});
           setSubmitting(false);
         } else {
           setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
         }
 
-        // --- EVENTS DEBUG (robust, cannot crash) ---
+        // --- EVENTS DEBUG (robust) ---
         try {
           const lines: string[] = [];
 
@@ -247,7 +276,6 @@ export default function App() {
             const sec = event.section;
             const met = event.method;
 
-            // Attempted contains the REAL XCM error + index
             if (sec === "polkadotXcm" && met === "Attempted") {
               let payload = "";
               try {
@@ -264,8 +292,8 @@ export default function App() {
               sec === "xcmPallet" ||
               sec === "xcmpQueue" ||
               sec === "messageQueue" ||
-              sec === "dmpQueue" ||
               sec === "balances" ||
+              sec === "assets" ||
               sec === "system"
             ) {
               let payload = "";
@@ -279,29 +307,17 @@ export default function App() {
           }
 
           if (lines.length > 0) {
-            setSubmitLog(
-              (s) =>
-                s +
-                `\n--- EVENTS (debug) ---\n` +
-                lines.join("\n") +
-                `\n--- END EVENTS ---\n`
-            );
+            setSubmitLog((s) => s + `\n--- EVENTS (debug) ---\n` + lines.join("\n") + `\n--- END EVENTS ---\n`);
           }
         } catch (e: any) {
-          setSubmitLog(
-            (s) => s + `\n(event log error: ${e?.message ?? String(e)})\n`
-          );
+          setSubmitLog((s) => s + `\n(event log error: ${e?.message ?? String(e)})\n`);
         }
 
-        // dispatch error
         if (result.dispatchError && !dispatchLogged) {
           dispatchLogged = true;
-
           let errMsg = result.dispatchError.toString();
           if (result.dispatchError.isModule) {
-            const decoded = api!.registry.findMetaError(
-              result.dispatchError.asModule
-            );
+            const decoded = api!.registry.findMetaError(result.dispatchError.asModule);
             errMsg = `${decoded.section}.${decoded.name}: ${decoded.docs.join(" ")}`;
           }
           setSubmitLog((s) => s + `❌ DispatchError: ${errMsg}\n`);
@@ -341,11 +357,11 @@ export default function App() {
         onDryRun={handleDryRun}
         dryRun={dryRun}
         canSubmitReal={canSubmitReal}
-        onSubmitReal={submitReal_AssethubToHydraDot}
+        onSubmitReal={submitReal_AssethubToHydra_USDC}
         submitHelp={
           supportsRealSubmit
-            ? "Real submit enabled for DOT Asset Hub → HydraDX."
-            : "Real submit supports only: DOT Asset Hub → HydraDX."
+            ? "Real submit enabled for USDC (Asset Hub) → HydraDX."
+            : "Real submit supports only: USDC (Asset Hub) → HydraDX."
         }
       />
 
@@ -369,15 +385,10 @@ export default function App() {
       <footer style={{ marginTop: 40, opacity: 0.6 }}>
         <p style={{ margin: 0 }}>
           Source:{" "}
-          <a
-            href="https://github.com/il-corvo/xcm-crosspay"
-            target="_blank"
-            rel="noreferrer"
-          >
+          <a href="https://github.com/il-corvo/xcm-crosspay" target="_blank" rel="noreferrer">
             GitHub (MIT)
           </a>
         </p>
-
         <div style={{ marginTop: 10, fontSize: 12, opacity: 0.6 }}>
           Build: {buildSha.slice(0, 7)}
         </div>
