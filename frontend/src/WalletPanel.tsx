@@ -66,7 +66,7 @@ export function WalletPanel(props: {
     onChainData?.({ status: s });
   };
 
-  // 1) Wallet enable + accounts
+  // 1) Enable wallet + accounts
   useEffect(() => {
     let cancelled = false;
 
@@ -94,6 +94,7 @@ export function WalletPanel(props: {
         }));
 
         setAccounts(mapped);
+
         const first = mapped[0]?.address ?? "";
         setSelected(first);
         if (first) onSelectedAddress?.(first);
@@ -111,12 +112,12 @@ export function WalletPanel(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Keep parent informed of selected address
+  // keep parent updated with selected address
   useEffect(() => {
     if (selected) onSelectedAddress?.(selected);
   }, [selected, onSelectedAddress]);
 
-  // 2) Chain RPC connect + balance subscribe
+  // 2) Chain RPC connect + read ED + subscribe balance
   useEffect(() => {
     let api: ApiPromise | null = null;
     let unsub: (() => void) | undefined;
@@ -137,10 +138,8 @@ export function WalletPanel(props: {
         for (const url of rpcs) {
           try {
             setStatusN(`Connecting to ${chain} RPC: ${url}`);
-
             const provider = new WsProvider(url);
             api = await withTimeout(ApiPromise.create({ provider }), 8000);
-
             connected = true;
             break;
           } catch (e) {
@@ -157,7 +156,7 @@ export function WalletPanel(props: {
 
         setStatusN("Connected. Reading balance...");
 
-        // ED (existential deposit)
+        // ED
         const edConst = api.consts.balances?.existentialDeposit?.toString?.();
         if (edConst) {
           const edDot = fmtPlanckToDot(BigInt(edConst));
@@ -165,7 +164,6 @@ export function WalletPanel(props: {
           onChainData?.({ status: "Connected. Reading balance...", edDot });
         }
 
-        // Subscribe to balance
         unsub = (await api.query.system.account(selected, (info: any) => {
           const free = BigInt(info.data.free.toString());
           const balDot = fmtPlanckToDot(free);
@@ -207,8 +205,8 @@ export function WalletPanel(props: {
 
       {!extEnabled && (
         <div style={{ marginBottom: 10, opacity: 0.8 }}>
-          Install/enable a Polkadot wallet extension (polkadot{".js"}, Talisman, SubWallet, etc.)
-          and authorize this site.
+          Install/enable a Polkadot wallet extension (polkadot{".js"}, Talisman, SubWallet, etc.) and
+          authorize this site.
         </div>
       )}
 
@@ -218,9 +216,7 @@ export function WalletPanel(props: {
       {accounts.length > 0 && (
         <>
           <label>
-            <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>
-              Account
-            </div>
+            <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>Account</div>
             <select
               value={selected}
               onChange={(e) => setSelected(e.target.value)}
@@ -247,8 +243,7 @@ export function WalletPanel(props: {
           </div>
 
           <div style={{ marginTop: 10, fontSize: 13, opacity: 0.7 }}>
-            ED warning: sending too much may drop the remaining balance below ED and the account could be
-            reaped on that chain.
+            ED warning: sending too much may drop the remaining balance below ED and the account could be reaped.
           </div>
 
           <div style={{ marginTop: 12, fontSize: 13, opacity: 0.7 }}>

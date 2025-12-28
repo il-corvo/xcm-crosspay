@@ -15,14 +15,14 @@ const ASSETS = [
 export function SendForm(props: {
   value: TransferRequest;
   onChange: (next: TransferRequest) => void;
+
   feeQuote: FeeQuote;
   safetyMsg: string;
-  canSend: boolean;
 
+  canSend: boolean;
   onDryRun: () => void;
   dryRun?: XcmDryRun;
 
-  // Real submit
   canSubmitReal: boolean;
   onSubmitReal: () => void;
   submitHelp: string;
@@ -59,12 +59,7 @@ export function SendForm(props: {
           <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>From</div>
           <select
             value={value.from}
-            onChange={(e) =>
-              onChange({
-                ...value,
-                from: e.target.value as TransferRequest["from"],
-              })
-            }
+            onChange={(e) => onChange({ ...value, from: e.target.value as TransferRequest["from"] })}
             style={{ width: "100%", padding: 10, borderRadius: 8 }}
           >
             {CHAINS.map((c) => (
@@ -79,12 +74,7 @@ export function SendForm(props: {
           <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>To</div>
           <select
             value={value.to}
-            onChange={(e) =>
-              onChange({
-                ...value,
-                to: e.target.value as TransferRequest["to"],
-              })
-            }
+            onChange={(e) => onChange({ ...value, to: e.target.value as TransferRequest["to"] })}
             style={{ width: "100%", padding: 10, borderRadius: 8 }}
           >
             {CHAINS.map((c) => (
@@ -99,12 +89,7 @@ export function SendForm(props: {
           <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>Asset</div>
           <select
             value={value.asset}
-            onChange={(e) =>
-              onChange({
-                ...value,
-                asset: e.target.value as TransferRequest["asset"],
-              })
-            }
+            onChange={(e) => onChange({ ...value, asset: e.target.value as TransferRequest["asset"] })}
             style={{ width: "100%", padding: 10, borderRadius: 8 }}
           >
             {ASSETS.map((a) => (

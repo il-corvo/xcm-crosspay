@@ -16,6 +16,19 @@ import { ApiPromise, WsProvider } from "@polkadot/api";
 import { web3FromAddress } from "@polkadot/extension-dapp";
 import { decodeAddress } from "@polkadot/util-crypto";
 
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error("RPC timeout")), ms);
+    p.then((v) => {
+      clearTimeout(t);
+      resolve(v);
+    }).catch((e) => {
+      clearTimeout(t);
+      reject(e);
+    });
+  });
+}
+
 export default function App() {
   const buildSha = import.meta.env.VITE_BUILD_SHA ?? "dev";
 
@@ -26,10 +39,7 @@ export default function App() {
     amount: "",
   });
 
-  const [wallet, setWallet] = useState<WalletChainData>({
-    status: "Not connected",
-  });
-
+  const [wallet, setWallet] = useState<WalletChainData>({ status: "Not connected" });
   const [selectedAddress, setSelectedAddress] = useState<string>("");
 
   const [dryRun, setDryRun] = useState<XcmDryRun | undefined>(undefined);
@@ -38,45 +48,29 @@ export default function App() {
 
   const errors = useMemo(() => validateRequest(req), [req]);
 
-  // Placeholder Phase 1: network fee estimate fixed (later: real estimation)
+  // placeholder fee estimate (Phase 1)
   const networkFeeDotEst = 0.012;
 
   const amt = Number(req.amount || "0");
   const amtNum = Number.isFinite(amt) ? amt : 0;
 
-  // Service fee base:
-  // - DOT send: proportional
-  // - USDC send: min clamp (Phase 1 simplification)
   const amountForServiceFeeDot = req.asset === "DOT" ? amtNum : 0;
 
   const feeQuote = useMemo(() => {
-    const q = quoteFeesDot(
-      amountForServiceFeeDot,
-      networkFeeDotEst,
-      DEFAULT_SERVICE_FEE
-    );
+    const q = quoteFeesDot(amountForServiceFeeDot, networkFeeDotEst, DEFAULT_SERVICE_FEE);
     if (req.asset !== "DOT") {
-      q.notes = [
-        ...q.notes,
-        "USDC transfer: service fee is currently min-clamped (Phase 1).",
-      ];
+      q.notes = [...q.notes, "USDC transfer: service fee is currently min-clamped (Phase 1)."];
     }
     return q;
   }, [req.asset, amountForServiceFeeDot]);
 
-  // Wallet safety check (ED)
   const bal = Number(wallet.balanceDot ?? "NaN");
   const ed = Number(wallet.edDot ?? "NaN");
   const feeTotal = Number(feeQuote.totalFeeDot);
 
-  const hasWalletNums =
-    Number.isFinite(bal) && Number.isFinite(ed) && Number.isFinite(feeTotal);
+  const hasWalletNums = Number.isFinite(bal) && Number.isFinite(ed) && Number.isFinite(feeTotal);
 
-  // Required DOT depends on asset:
-  // - DOT: amount + fees
-  // - USDC: fees only (still must keep ED)
   const requiredDot = req.asset === "DOT" ? amtNum + feeTotal : feeTotal;
-
   const remaining = hasWalletNums ? bal - requiredDot : NaN;
   const safe = hasWalletNums ? remaining >= ed : false;
 
@@ -88,7 +82,6 @@ export default function App() {
 
   const canDryRun = errors.length === 0 && safe;
 
-  // Only support first real submit case:
   const supportsRealSubmit =
     req.from === "assethub" &&
     req.to === "hydradx" &&
@@ -99,141 +92,116 @@ export default function App() {
   const canSubmitReal = canDryRun && supportsRealSubmit && !submitting;
 
   const handleDryRun = () => {
-    const preview = buildXcmDryRun(req, feeQuote);
-    setDryRun(preview);
+    setDryRun(buildXcmDryRun(req, feeQuote));
   };
 
-  // --- REAL SUBMIT (Asset Hub -> HydraDX, DOT) ---
   async function submitReal_AssethubToHydraDot() {
     setSubmitLog("");
     setSubmitting(true);
 
     try {
-      // Defensive re-check
       if (!supportsRealSubmit) {
-        throw new Error(
-          "Real submit currently supports only: from=assethub, to=hydradx, asset=DOT."
-        );
+        throw new Error("Real submit supports only: DOT Asset Hub → HydraDX.");
       }
       if (!canDryRun) {
         throw new Error("Form is not safe/valid yet.");
       }
 
-// Connect to Asset Hub RPC (defensive): 5 endpoints + timeout
-const RPCS = [
-  "wss://asset-hub-polkadot-rpc.dwellir.com",
-  "wss://polkadot-asset-hub-rpc.polkadot.io",
-  "wss://rpc-asset-hub-polkadot.luckyfriday.io",
-  "wss://asset-hub-polkadot-rpc.dwellir.com", // duplicate ok (sometimes different edge routing)
-  "wss://polkadot-asset-hub-rpc.polkadot.io", // duplicate ok
-];
+      // 5 RPC endpoints + timeout + logs
+      const RPCS = [
+        "wss://asset-hub-polkadot-rpc.dwellir.com",
+        "wss://polkadot-asset-hub-rpc.polkadot.io",
+        "wss://rpc-asset-hub-polkadot.luckyfriday.io",
+        "wss://asset-hub-polkadot-rpc.dwellir.com/ws",
+        "wss://polkadot-asset-hub-rpc.polkadot.io/ws",
+      ];
 
-// small helper inside function (keeps scope local)
-const withTimeout = async <T,>(p: Promise<T>, ms: number): Promise<T> => {
-  return await new Promise<T>((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error("RPC timeout")), ms);
-    p.then((v) => {
-      clearTimeout(t);
-      resolve(v);
-    }).catch((e) => {
-      clearTimeout(t);
-      reject(e);
-    });
-  });
-};
+      setSubmitLog((s) => s + "Connecting to Asset Hub RPC (fallback mode)\n");
 
-let api: ApiPromise | null = null;
-let lastErr: any = null;
+      let api: ApiPromise | null = null;
+      let lastErr: any = null;
 
-setSubmitLog((s) => s + `Connecting to Asset Hub RPC (fallback mode)\n`);
+      for (const rpc of RPCS) {
+        try {
+          setSubmitLog((s) => s + `→ Trying: ${rpc}\n`);
+          const provider = new WsProvider(rpc);
+          api = await withTimeout(ApiPromise.create({ provider }), 8000);
+          setSubmitLog((s) => s + `✅ Connected: ${rpc}\n`);
+          break;
+        } catch (e: any) {
+          lastErr = e;
+          setSubmitLog((s) => s + `✗ Failed: ${rpc} (${e?.message ?? String(e)})\n`);
+        }
+      }
 
-for (const rpc of RPCS) {
-  try {
-    setSubmitLog((s) => s + `→ Trying: ${rpc}\n`);
-    const provider = new WsProvider(rpc);
-    api = await withTimeout(ApiPromise.create({ provider }), 8000);
-    setSubmitLog((s) => s + `✅ Connected: ${rpc}\n`);
-    break;
-  } catch (e: any) {
-    lastErr = e;
-    setSubmitLog((s) => s + `✗ Failed: ${rpc} (${e?.message ?? String(e)})\n`);
-  }
-}
+      if (!api) {
+        throw new Error(`All Asset Hub RPC endpoints failed. Last error: ${lastErr?.message ?? String(lastErr)}`);
+      }
 
-if (!api) {
-  throw new Error(
-    `All Asset Hub RPC endpoints failed. Last error: ${lastErr?.message ?? String(lastErr)}`
-  );
-}
-
-      // Inject signer from extension
+      // signer injection
       const injector = await web3FromAddress(selectedAddress);
       api.setSigner(injector.signer);
 
       // HydraDX paraId on Polkadot
       const HYDRADX_PARA = 2034;
 
-      // Build destination multilocation:
-      // From Asset Hub (parachain) to another parachain -> parents: 1, X1 Parachain
-      const dest = api.createType("XcmVersionedMultiLocation", {
-        V3: { parents: 1, interior: { X1: { Parachain: HYDRADX_PARA } } },
-      });
+      // IMPORTANT: shape-based XCM args (NO createType XcmVersioned*)
+      const dest = {
+        parents: 1,
+        interior: { X1: { Parachain: HYDRADX_PARA } },
+      };
 
-      // Beneficiary: AccountId32 on destination
       const id = decodeAddress(selectedAddress); // Uint8Array(32)
-      const beneficiary = api.createType("XcmVersionedMultiLocation", {
-        V3: {
-          parents: 0,
-          interior: {
-            X1: { AccountId32: { network: null, id } },
+      const beneficiary = {
+        parents: 0,
+        interior: {
+          X1: {
+            AccountId32: {
+              network: null,
+              id,
+            },
           },
         },
-      });
+      };
 
-      // Assets: DOT is relay-chain native asset, represented as parents:1, interior:Here
-      // Amount must be in plancks (DOT has 10 decimals)
+      // Amount planck (DOT 10 decimals) - ok for alpha; later switch to decimal library
       const amountPlanck = BigInt(Math.floor(amtNum * 10 ** 10));
       if (amountPlanck <= 0n) throw new Error("Amount too small.");
 
-      const assets = api.createType("XcmVersionedMultiAssets", {
-        V3: [
-          {
-            id: { Concrete: { parents: 1, interior: "Here" } },
-            fun: { Fungible: amountPlanck.toString() },
+      const assets = [
+        {
+          id: {
+            Concrete: {
+              parents: 1,
+              interior: "Here",
+            },
           },
-        ],
-      });
+          fun: {
+            Fungible: amountPlanck.toString(),
+          },
+        },
+      ];
 
       const feeAssetItem = 0;
-      const weightLimit = api.createType("XcmV3WeightLimit", "Unlimited");
+      const weightLimit = "Unlimited";
 
-      // Build call
       const tx = api.tx.polkadotXcm.limitedReserveTransferAssets(
-        dest,
-        beneficiary,
-        assets,
+        dest as any,
+        beneficiary as any,
+        assets as any,
         feeAssetItem,
-        weightLimit
+        weightLimit as any
       );
 
-      setSubmitLog((s) => s + `Signing & submitting...\n`);
+      setSubmitLog((s) => s + "Signing & submitting...\n");
 
       const unsub = await tx.signAndSend(selectedAddress, (result) => {
         if (result.status.isInBlock) {
-          setSubmitLog(
-            (s) =>
-              s +
-              `✅ In block: ${result.status.asInBlock.toString()}\n` +
-              `Events: ${result.events.length}\n`
-          );
+          setSubmitLog((s) => s + `✅ In block: ${result.status.asInBlock.toString()}\n`);
         } else if (result.status.isFinalized) {
-          setSubmitLog(
-            (s) =>
-              s +
-              `🎉 Finalized: ${result.status.asFinalized.toString()}\n`
-          );
+          setSubmitLog((s) => s + `🎉 Finalized: ${result.status.asFinalized.toString()}\n`);
           unsub();
-          api.disconnect().catch(() => {});
+          api?.disconnect().catch(() => {});
           setSubmitting(false);
         } else {
           setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
@@ -241,14 +209,9 @@ if (!api) {
 
         if (result.dispatchError) {
           let errMsg = result.dispatchError.toString();
-          // If it's a module error, decode it
           if (result.dispatchError.isModule) {
-            const decoded = api.registry.findMetaError(
-              result.dispatchError.asModule
-            );
-            errMsg = `${decoded.section}.${decoded.name}: ${decoded.docs.join(
-              " "
-            )}`;
+            const decoded = api!.registry.findMetaError(result.dispatchError.asModule);
+            errMsg = `${decoded.section}.${decoded.name}: ${decoded.docs.join(" ")}`;
           }
           setSubmitLog((s) => s + `❌ DispatchError: ${errMsg}\n`);
         }
@@ -264,8 +227,7 @@ if (!api) {
       <header style={{ marginBottom: 24 }}>
         <h1 style={{ margin: 0 }}>XCM CrossPay</h1>
         <p style={{ marginTop: 8, opacity: 0.8 }}>
-          Non-custodial XCM transfers across Polkadot chains — simple, defensive
-          flows.
+          Non-custodial XCM transfers across Polkadot chains — simple, defensive flows.
         </p>
       </header>
 
@@ -291,18 +253,10 @@ if (!api) {
       <section style={{ marginTop: 28 }}>
         <h2 style={{ marginBottom: 8 }}>Phase 0 scope</h2>
         <ul>
-          <li>
-            <b>Assets</b>: DOT, USDC (Asset Hub)
-          </li>
-          <li>
-            <b>Chains</b>: Asset Hub ↔ HydraDX
-          </li>
-          <li>
-            <b>Routing</b>: defensive (via Asset Hub when needed)
-          </li>
-          <li>
-            <b>Fees</b>: network fees + service fee (0.15%, clamped)
-          </li>
+          <li><b>Assets</b>: DOT, USDC (Asset Hub)</li>
+          <li><b>Chains</b>: Asset Hub ↔ HydraDX</li>
+          <li><b>Routing</b>: defensive (via Asset Hub when needed)</li>
+          <li><b>Fees</b>: network fees + service fee (0.15%, clamped)</li>
         </ul>
       </section>
 
@@ -324,13 +278,12 @@ if (!api) {
         canSend={canDryRun}
         onDryRun={handleDryRun}
         dryRun={dryRun}
-        // Real submit controls
         canSubmitReal={canSubmitReal}
         onSubmitReal={submitReal_AssethubToHydraDot}
         submitHelp={
           supportsRealSubmit
             ? "Real submit enabled for DOT Asset Hub → HydraDX."
-            : "Real submit currently supports only: DOT Asset Hub → HydraDX."
+            : "Real submit supports only: DOT Asset Hub → HydraDX."
         }
       />
 
@@ -354,11 +307,7 @@ if (!api) {
       <footer style={{ marginTop: 40, opacity: 0.6 }}>
         <p style={{ margin: 0 }}>
           Source:{" "}
-          <a
-            href="https://github.com/il-corvo/xcm-crosspay"
-            target="_blank"
-            rel="noreferrer"
-          >
+          <a href="https://github.com/il-corvo/xcm-crosspay" target="_blank" rel="noreferrer">
             GitHub (MIT)
           </a>
         </p>
