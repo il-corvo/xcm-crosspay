@@ -222,24 +222,24 @@ export default function App() {
       if (amountInt <= 0n) throw new Error("Amount too small (after decimals).");
 
       // assets: VersionedAssets V3 with PalletInstance 50 / GeneralIndex 1337 (same as on-chain accepted tx)
-      const assets = {
-        V3: [
-          {
-            fun: { Fungible: amountInt.toString() },
-            id: {
-              Concrete: {
-                parents: 0,
-                interior: {
-                  X2: {
-                    col0: { PalletInstance: 50 },
-                    col1: { GeneralIndex: String(USDC_ASSET_ID) },
-                  },
-                },
-              },
-            },
+const assets = {
+  V3: [
+    {
+      fun: { Fungible: amountInt.toString() },
+      id: {
+        Concrete: {
+          parents: 0,
+          interior: {
+            X2: [
+              { PalletInstance: 50 },
+              { GeneralIndex: String(USDC_ASSET_ID) },
+            ],
           },
-        ],
-      };
+        },
+      },
+    },
+  ],
+};
 
       const feeAssetItem = 0;
       const weightLimit = { Unlimited: null };
