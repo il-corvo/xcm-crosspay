@@ -57,7 +57,6 @@ export function WalletPanel(props: {
 
   // Native token info (DOT on Asset Hub, HDX on Hydra, etc.)
   const [nativeSymbol, setNativeSymbol] = useState<string>("NATIVE");
-  const [nativeDecimals, setNativeDecimals] = useState<number>(10);
   const [nativeBal, setNativeBal] = useState<string>("-");
   const [nativeEd, setNativeEd] = useState<string>("-");
 
@@ -170,7 +169,6 @@ export function WalletPanel(props: {
         // Native chain token + decimals (truth source)
         const dec = (api.registry.chainDecimals?.[0] ?? 10) as number;
         const tok = (api.registry.chainTokens?.[0] ?? "NATIVE") as string;
-        setNativeDecimals(dec);
         setNativeSymbol(tok);
 
         setStatusN("Connected. Reading balances...");
