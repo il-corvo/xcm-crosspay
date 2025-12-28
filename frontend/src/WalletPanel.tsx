@@ -63,8 +63,8 @@ export function WalletPanel(props: {
   const [balanceDot, setBalanceDot] = useState<string>("-");
   const [edDot, setEdDot] = useState<string>("-");
 
-  // NEW: Asset Hub USDC display
-  const [usdcLabel, setUsdcLabel] = useState<string>("USDC");
+  // Asset Hub USDC (assetId 1337)
+  const [usdcLabel, setUsdcLabel] = useState<string>("USDC (Asset Hub)");
   const [usdcBal, setUsdcBal] = useState<string>("-");
 
   const selectedAccount = useMemo(
@@ -128,10 +128,13 @@ export function WalletPanel(props: {
     if (selected) onSelectedAddress?.(selected);
   }, [selected, onSelectedAddress]);
 
-  // 2) Connect RPC + read ED + subscribe DOT balance
+  // 2) Connect RPC + subscribe balances
   useEffect(() => {
     let api: ApiPromise | null = null;
+
     let unsubDot: (() => void) | undefined;
+    let unsubUsdc: (() => void) | undefined;
+
     let cancelled = false;
 
     async function connectAndSubscribe() {
@@ -142,7 +145,7 @@ export function WalletPanel(props: {
       // reset USDC display when switching away from Asset Hub
       if (chain !== "assethub") {
         setUsdcBal("-");
-        setUsdcLabel("USDC");
+        setUsdcLabel("USDC (Asset Hub)");
       }
 
       if (!selected) return;
@@ -180,7 +183,7 @@ export function WalletPanel(props: {
           onChainData?.({ status: "Connected. Reading balances...", edDot: ed });
         }
 
-        // Subscribe DOT free balance (balances pallet)
+        // DOT subscribe (balances pallet)
         unsubDot = (await api.query.system.account(selected, (info: any) => {
           const free = BigInt(info.data.free.toString());
           const dot = fmtPlanckToDot(free);
@@ -188,24 +191,27 @@ export function WalletPanel(props: {
           onChainData?.({ status: "Live balance (read-only)", balanceDot: dot });
         })) as unknown as () => void;
 
-        // If on Asset Hub, also read USDC from assets pallet
+        // USDC subscribe (assets pallet) ONLY on Asset Hub
         if (chain === "assethub") {
           try {
             const USDC_ID = 1337;
 
             const md: any = await api.query.assets.metadata(USDC_ID);
             const decimals = Number(md.decimals?.toString?.() ?? "6");
-
-            // symbol sometimes comes as bytes/Vec<u8>; toHuman is usually readable
             const symHuman = md.symbol?.toHuman?.();
             const sym = typeof symHuman === "string" ? symHuman : "USDC";
             setUsdcLabel(`${sym} (Asset Hub)`);
 
-            const acc: any = await api.query.assets.account(USDC_ID, selected);
-            const bal = BigInt(acc.balance.toString());
-            setUsdcBal(fmtIntWithDecimals(bal, decimals));
+            unsubUsdc = (await api.query.assets.account(
+              USDC_ID,
+              selected,
+              (acc: any) => {
+                const bal = BigInt(acc.balance.toString());
+                setUsdcBal(fmtIntWithDecimals(bal, decimals));
+              }
+            )) as unknown as () => void;
           } catch (e) {
-            console.warn("USDC read failed:", e);
+            console.warn("USDC subscribe failed:", e);
             setUsdcLabel("USDC (Asset Hub)");
             setUsdcBal("-");
           }
@@ -221,9 +227,15 @@ export function WalletPanel(props: {
 
     return () => {
       cancelled = true;
+
       try {
         if (unsubDot) unsubDot();
       } catch {}
+
+      try {
+        if (unsubUsdc) unsubUsdc();
+      } catch {}
+
       try {
         api?.disconnect();
       } catch {}
