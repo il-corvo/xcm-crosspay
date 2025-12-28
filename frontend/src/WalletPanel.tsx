@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { web3Accounts, web3Enable } from "@polkadot/extension-dapp";
 import { ApiPromise, WsProvider } from "@polkadot/api";
+import { decodeAddress } from "@polkadot/util-crypto";
 
 export type ChainKey = "assethub" | "hydradx";
 
@@ -14,13 +15,6 @@ const RPCS: Record<ChainKey, string[]> = {
 };
 
 type UiAccount = { address: string; name?: string };
-
-function fmtPlanckToDot(planck: bigint, decimals = 10): string {
-  const s = planck.toString().padStart(decimals + 1, "0");
-  const whole = s.slice(0, -decimals);
-  const frac = s.slice(-decimals).replace(/0+$/, "");
-  return frac ? `${whole}.${frac}` : whole;
-}
 
 function fmtIntWithDecimals(v: bigint, decimals: number): string {
   const base = 10n ** BigInt(decimals);
@@ -44,8 +38,8 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 
 export type WalletChainData = {
   status: string;
-  balanceDot?: string;
-  edDot?: string;
+  balanceDot?: string; // (legacy name) actually "native balance" for selected chain
+  edDot?: string;      // (legacy name) actually "native ED" for selected chain
 };
 
 export function WalletPanel(props: {
@@ -60,8 +54,12 @@ export function WalletPanel(props: {
   const [selected, setSelected] = useState<string>("");
 
   const [status, setStatus] = useState<string>("Not connected");
-  const [balanceDot, setBalanceDot] = useState<string>("-");
-  const [edDot, setEdDot] = useState<string>("-");
+
+  // Native token info (DOT on Asset Hub, HDX on Hydra, etc.)
+  const [nativeSymbol, setNativeSymbol] = useState<string>("NATIVE");
+  const [nativeDecimals, setNativeDecimals] = useState<number>(10);
+  const [nativeBal, setNativeBal] = useState<string>("-");
+  const [nativeEd, setNativeEd] = useState<string>("-");
 
   // Asset Hub USDC (assetId 1337)
   const [usdcLabel, setUsdcLabel] = useState<string>("USDC (Asset Hub)");
@@ -132,21 +130,17 @@ export function WalletPanel(props: {
   useEffect(() => {
     let api: ApiPromise | null = null;
 
-    let unsubDot: (() => void) | undefined;
+    let unsubNative: (() => void) | undefined;
     let unsubUsdc: (() => void) | undefined;
 
     let cancelled = false;
 
     async function connectAndSubscribe() {
-      setBalanceDot("-");
-      setEdDot("-");
-      onChainData?.({ status: "Loading...", balanceDot: undefined, edDot: undefined });
+      setNativeBal("-");
+      setNativeEd("-");
+      setUsdcBal("-");
 
-      // reset USDC display when switching away from Asset Hub
-      if (chain !== "assethub") {
-        setUsdcBal("-");
-        setUsdcLabel("USDC (Asset Hub)");
-      }
+      onChainData?.({ status: "Loading...", balanceDot: undefined, edDot: undefined });
 
       if (!selected) return;
 
@@ -173,43 +167,49 @@ export function WalletPanel(props: {
 
         if (cancelled) return;
 
+        // Native chain token + decimals (truth source)
+        const dec = (api.registry.chainDecimals?.[0] ?? 10) as number;
+        const tok = (api.registry.chainTokens?.[0] ?? "NATIVE") as string;
+        setNativeDecimals(dec);
+        setNativeSymbol(tok);
+
         setStatusN("Connected. Reading balances...");
 
-        // ED (balances pallet)
+        // Native ED (balances pallet) formatted with chain decimals
         const edConst = api.consts.balances?.existentialDeposit?.toString?.();
         if (edConst) {
-          const ed = fmtPlanckToDot(BigInt(edConst));
-          setEdDot(ed);
-          onChainData?.({ status: "Connected. Reading balances...", edDot: ed });
+          const edInt = BigInt(edConst);
+          const edFmt = fmtIntWithDecimals(edInt, dec);
+          setNativeEd(edFmt);
+          onChainData?.({ status: "Connected. Reading balances...", edDot: edFmt });
         }
 
-        // DOT subscribe (balances pallet)
-        unsubDot = (await api.query.system.account(selected, (info: any) => {
+        // Subscribe native free balance (balances pallet)
+        unsubNative = (await api.query.system.account(selected, (info: any) => {
           const free = BigInt(info.data.free.toString());
-          const dot = fmtPlanckToDot(free);
-          setBalanceDot(dot);
-          onChainData?.({ status: "Live balance (read-only)", balanceDot: dot });
+          const balFmt = fmtIntWithDecimals(free, dec);
+          setNativeBal(balFmt);
+          onChainData?.({ status: "Live balance (read-only)", balanceDot: balFmt });
         })) as unknown as () => void;
 
-        // USDC subscribe (assets pallet) ONLY on Asset Hub
+        // Subscribe USDC only on Asset Hub (Assets pallet id 1337)
         if (chain === "assethub") {
           try {
             const USDC_ID = 1337;
 
             const md: any = await api.query.assets.metadata(USDC_ID);
-            const decimals = Number(md.decimals?.toString?.() ?? "6");
+            const usdcDecimals = Number(md.decimals?.toString?.() ?? "6");
             const symHuman = md.symbol?.toHuman?.();
             const sym = typeof symHuman === "string" ? symHuman : "USDC";
             setUsdcLabel(`${sym} (Asset Hub)`);
 
-            unsubUsdc = (await api.query.assets.account(
-              USDC_ID,
-              selected,
-              (acc: any) => {
-                const bal = BigInt(acc.balance.toString());
-                setUsdcBal(fmtIntWithDecimals(bal, decimals));
-              }
-            )) as unknown as () => void;
+            // IMPORTANT: pass AccountId32 bytes (robust across runtimes)
+            const who = decodeAddress(selected);
+
+            unsubUsdc = (await api.query.assets.account(USDC_ID, who, (acc: any) => {
+              const bal = BigInt(acc.balance.toString());
+              setUsdcBal(fmtIntWithDecimals(bal, usdcDecimals));
+            })) as unknown as () => void;
           } catch (e) {
             console.warn("USDC subscribe failed:", e);
             setUsdcLabel("USDC (Asset Hub)");
@@ -229,7 +229,7 @@ export function WalletPanel(props: {
       cancelled = true;
 
       try {
-        if (unsubDot) unsubDot();
+        if (unsubNative) unsubNative();
       } catch {}
 
       try {
@@ -242,6 +242,11 @@ export function WalletPanel(props: {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chain, selected]);
+
+  const edHelp =
+    chain === "assethub"
+      ? "ED matters for keeping the account alive on this chain. Keep a DOT buffer."
+      : "ED is chain-specific and refers to the chain native token (shown above).";
 
   return (
     <div
@@ -288,11 +293,12 @@ export function WalletPanel(props: {
             </div>
 
             <div>
-              <b>DOT (free):</b> {balanceDot}
+              <b>{nativeSymbol} (free):</b> {nativeBal}
             </div>
 
             <div>
-              <b>Existential Deposit (ED):</b> {edDot}
+              <b>Existential Deposit (ED):</b> {nativeEd}{" "}
+              <span style={{ opacity: 0.6 }}>(native)</span>
             </div>
 
             {chain === "assethub" && (
@@ -303,7 +309,7 @@ export function WalletPanel(props: {
           </div>
 
           <div style={{ marginTop: 10, fontSize: 13, opacity: 0.7 }}>
-            ED warning: sending too much may drop the remaining DOT balance below ED and the account could be reaped.
+            {edHelp}
           </div>
 
           <div style={{ marginTop: 12, fontSize: 13, opacity: 0.7 }}>
