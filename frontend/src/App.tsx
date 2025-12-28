@@ -39,16 +39,19 @@ export default function App() {
     amount: "",
   });
 
-  const [wallet, setWallet] = useState<WalletChainData>({ status: "Not connected" });
+  const [wallet, setWallet] = useState<WalletChainData>({
+    status: "Not connected",
+  });
+
   const [selectedAddress, setSelectedAddress] = useState<string>("");
 
   const [dryRun, setDryRun] = useState<XcmDryRun | undefined>(undefined);
   const [submitLog, setSubmitLog] = useState<string>("");
-  const [submitting, setSubmitting] = useState<boolean>(false);
+  const [submitting, setSubmitting] = useState(false);
 
   const errors = useMemo(() => validateRequest(req), [req]);
 
-  // placeholder fee estimate (Phase 1)
+  // Phase 1: fixed network fee estimate (placeholder)
   const networkFeeDotEst = 0.012;
 
   const amt = Number(req.amount || "0");
@@ -57,9 +60,13 @@ export default function App() {
   const amountForServiceFeeDot = req.asset === "DOT" ? amtNum : 0;
 
   const feeQuote = useMemo(() => {
-    const q = quoteFeesDot(amountForServiceFeeDot, networkFeeDotEst, DEFAULT_SERVICE_FEE);
+    const q = quoteFeesDot(
+      amountForServiceFeeDot,
+      networkFeeDotEst,
+      DEFAULT_SERVICE_FEE
+    );
     if (req.asset !== "DOT") {
-      q.notes = [...q.notes, "USDC transfer: service fee is currently min-clamped (Phase 1)."];
+      q.notes = [...q.notes, "USDC transfer: service fee is min-clamped (Phase 1)."];
     }
     return q;
   }, [req.asset, amountForServiceFeeDot]);
@@ -68,7 +75,8 @@ export default function App() {
   const ed = Number(wallet.edDot ?? "NaN");
   const feeTotal = Number(feeQuote.totalFeeDot);
 
-  const hasWalletNums = Number.isFinite(bal) && Number.isFinite(ed) && Number.isFinite(feeTotal);
+  const hasWalletNums =
+    Number.isFinite(bal) && Number.isFinite(ed) && Number.isFinite(feeTotal);
 
   const requiredDot = req.asset === "DOT" ? amtNum + feeTotal : feeTotal;
   const remaining = hasWalletNums ? bal - requiredDot : NaN;
@@ -95,6 +103,9 @@ export default function App() {
     setDryRun(buildXcmDryRun(req, feeQuote));
   };
 
+  // =========================
+  // REAL SUBMIT (XCM V3)
+  // =========================
   async function submitReal_AssethubToHydraDot() {
     setSubmitLog("");
     setSubmitting(true);
@@ -107,7 +118,6 @@ export default function App() {
         throw new Error("Form is not safe/valid yet.");
       }
 
-      // 5 RPC endpoints + timeout + logs
       const RPCS = [
         "wss://asset-hub-polkadot-rpc.dwellir.com",
         "wss://polkadot-asset-hub-rpc.polkadot.io",
@@ -124,8 +134,10 @@ export default function App() {
       for (const rpc of RPCS) {
         try {
           setSubmitLog((s) => s + `→ Trying: ${rpc}\n`);
-          const provider = new WsProvider(rpc);
-          api = await withTimeout(ApiPromise.create({ provider }), 8000);
+          api = await withTimeout(
+            ApiPromise.create({ provider: new WsProvider(rpc) }),
+            8000
+          );
           setSubmitLog((s) => s + `✅ Connected: ${rpc}\n`);
           break;
         } catch (e: any) {
@@ -135,55 +147,56 @@ export default function App() {
       }
 
       if (!api) {
-        throw new Error(`All Asset Hub RPC endpoints failed. Last error: ${lastErr?.message ?? String(lastErr)}`);
+        throw new Error(
+          `All Asset Hub RPC endpoints failed. Last error: ${lastErr?.message ?? String(lastErr)}`
+        );
       }
 
-      // signer injection
       const injector = await web3FromAddress(selectedAddress);
       api.setSigner(injector.signer);
 
-      // HydraDX paraId on Polkadot
       const HYDRADX_PARA = 2034;
 
-      // IMPORTANT: shape-based XCM args (NO createType XcmVersioned*)
       const dest = {
-        parents: 1,
-        interior: { X1: { Parachain: HYDRADX_PARA } },
+        V3: {
+          parents: 1,
+          interior: { X1: { Parachain: HYDRADX_PARA } },
+        },
       };
 
-      const id = decodeAddress(selectedAddress); // Uint8Array(32)
+      const id = decodeAddress(selectedAddress);
       const beneficiary = {
-        parents: 0,
-        interior: {
-          X1: {
-            AccountId32: {
-              network: null,
-              id,
+        V3: {
+          parents: 0,
+          interior: {
+            X1: {
+              AccountId32: { network: null, id },
             },
           },
         },
       };
 
-      // Amount planck (DOT 10 decimals) - ok for alpha; later switch to decimal library
       const amountPlanck = BigInt(Math.floor(amtNum * 10 ** 10));
       if (amountPlanck <= 0n) throw new Error("Amount too small.");
 
-      const assets = [
-        {
-          id: {
-            Concrete: {
-              parents: 1,
-              interior: "Here",
+      const assets = {
+        V3: [
+          {
+            id: {
+              Concrete: {
+                parents: 1,
+                interior: "Here",
+              },
+            },
+            fun: {
+              Fungible: amountPlanck.toString(),
             },
           },
-          fun: {
-            Fungible: amountPlanck.toString(),
-          },
-        },
-      ];
+        ],
+      };
 
       const feeAssetItem = 0;
-      const weightLimit = "Unlimited";
+      const weightLimit = { Unlimited: null };
 
       const tx = api.tx.polkadotXcm.limitedReserveTransferAssets(
         dest as any,
@@ -210,7 +223,9 @@ export default function App() {
         if (result.dispatchError) {
           let errMsg = result.dispatchError.toString();
           if (result.dispatchError.isModule) {
-            const decoded = api!.registry.findMetaError(result.dispatchError.asModule);
+            const decoded = api!.registry.findMetaError(
+              result.dispatchError.asModule
+            );
             errMsg = `${decoded.section}.${decoded.name}: ${decoded.docs.join(" ")}`;
           }
           setSubmitLog((s) => s + `❌ DispatchError: ${errMsg}\n`);
@@ -230,35 +245,6 @@ export default function App() {
           Non-custodial XCM transfers across Polkadot chains — simple, defensive flows.
         </p>
       </header>
-
-      <section
-        style={{
-          border: "1px solid #e5e5e5",
-          borderRadius: 10,
-          padding: 16,
-          background: "#fafafa",
-        }}
-      >
-        <strong>⚠️ Public alpha</strong>
-        <ul style={{ marginTop: 10 }}>
-          <li>All transactions are signed by the user (non-custodial).</li>
-          <li>No funds are ever held by this app.</li>
-          <li>Failed executions and edge cases are possible.</li>
-          <li>
-            <b>Use small amounts</b>.
-          </li>
-        </ul>
-      </section>
-
-      <section style={{ marginTop: 28 }}>
-        <h2 style={{ marginBottom: 8 }}>Phase 0 scope</h2>
-        <ul>
-          <li><b>Assets</b>: DOT, USDC (Asset Hub)</li>
-          <li><b>Chains</b>: Asset Hub ↔ HydraDX</li>
-          <li><b>Routing</b>: defensive (via Asset Hub when needed)</li>
-          <li><b>Fees</b>: network fees + service fee (0.15%, clamped)</li>
-        </ul>
-      </section>
 
       <WalletPanel
         chain={req.from as ChainKey}
