@@ -22,6 +22,13 @@ function fmtPlanckToDot(planck: bigint, decimals = 10): string {
   return frac ? `${whole}.${frac}` : whole;
 }
 
+function fmtIntWithDecimals(v: bigint, decimals: number): string {
+  const base = 10n ** BigInt(decimals);
+  const whole = (v / base).toString();
+  const frac = (v % base).toString().padStart(decimals, "0").replace(/0+$/, "");
+  return frac ? `${whole}.${frac}` : whole;
+}
+
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error("RPC timeout")), ms);
@@ -53,8 +60,12 @@ export function WalletPanel(props: {
   const [selected, setSelected] = useState<string>("");
 
   const [status, setStatus] = useState<string>("Not connected");
-  const [balance, setBalance] = useState<string>("-");
-  const [ed, setEd] = useState<string>("-");
+  const [balanceDot, setBalanceDot] = useState<string>("-");
+  const [edDot, setEdDot] = useState<string>("-");
+
+  // NEW: Asset Hub USDC display
+  const [usdcLabel, setUsdcLabel] = useState<string>("USDC");
+  const [usdcBal, setUsdcBal] = useState<string>("-");
 
   const selectedAccount = useMemo(
     () => accounts.find((a) => a.address === selected),
@@ -66,7 +77,7 @@ export function WalletPanel(props: {
     onChainData?.({ status: s });
   };
 
-  // 1) Enable wallet + accounts
+  // 1) Enable wallet + load accounts
   useEffect(() => {
     let cancelled = false;
 
@@ -117,16 +128,22 @@ export function WalletPanel(props: {
     if (selected) onSelectedAddress?.(selected);
   }, [selected, onSelectedAddress]);
 
-  // 2) Chain RPC connect + read ED + subscribe balance
+  // 2) Connect RPC + read ED + subscribe DOT balance
   useEffect(() => {
     let api: ApiPromise | null = null;
-    let unsub: (() => void) | undefined;
+    let unsubDot: (() => void) | undefined;
     let cancelled = false;
 
-    async function loadBalance() {
-      setBalance("-");
-      setEd("-");
+    async function connectAndSubscribe() {
+      setBalanceDot("-");
+      setEdDot("-");
       onChainData?.({ status: "Loading...", balanceDot: undefined, edDot: undefined });
+
+      // reset USDC display when switching away from Asset Hub
+      if (chain !== "assethub") {
+        setUsdcBal("-");
+        setUsdcLabel("USDC");
+      }
 
       if (!selected) return;
 
@@ -138,8 +155,7 @@ export function WalletPanel(props: {
         for (const url of rpcs) {
           try {
             setStatusN(`Connecting to ${chain} RPC: ${url}`);
-            const provider = new WsProvider(url);
-            api = await withTimeout(ApiPromise.create({ provider }), 8000);
+            api = await withTimeout(ApiPromise.create({ provider: new WsProvider(url) }), 8000);
             connected = true;
             break;
           } catch (e) {
@@ -154,22 +170,46 @@ export function WalletPanel(props: {
 
         if (cancelled) return;
 
-        setStatusN("Connected. Reading balance...");
+        setStatusN("Connected. Reading balances...");
 
-        // ED
+        // ED (balances pallet)
         const edConst = api.consts.balances?.existentialDeposit?.toString?.();
         if (edConst) {
-          const edDot = fmtPlanckToDot(BigInt(edConst));
-          setEd(edDot);
-          onChainData?.({ status: "Connected. Reading balance...", edDot });
+          const ed = fmtPlanckToDot(BigInt(edConst));
+          setEdDot(ed);
+          onChainData?.({ status: "Connected. Reading balances...", edDot: ed });
         }
 
-        unsub = (await api.query.system.account(selected, (info: any) => {
+        // Subscribe DOT free balance (balances pallet)
+        unsubDot = (await api.query.system.account(selected, (info: any) => {
           const free = BigInt(info.data.free.toString());
-          const balDot = fmtPlanckToDot(free);
-          setBalance(balDot);
-          onChainData?.({ status: "Live balance (read-only)", balanceDot: balDot });
+          const dot = fmtPlanckToDot(free);
+          setBalanceDot(dot);
+          onChainData?.({ status: "Live balance (read-only)", balanceDot: dot });
         })) as unknown as () => void;
+
+        // If on Asset Hub, also read USDC from assets pallet
+        if (chain === "assethub") {
+          try {
+            const USDC_ID = 1337;
+
+            const md: any = await api.query.assets.metadata(USDC_ID);
+            const decimals = Number(md.decimals?.toString?.() ?? "6");
+
+            // symbol sometimes comes as bytes/Vec<u8>; toHuman is usually readable
+            const symHuman = md.symbol?.toHuman?.();
+            const sym = typeof symHuman === "string" ? symHuman : "USDC";
+            setUsdcLabel(`${sym} (Asset Hub)`);
+
+            const acc: any = await api.query.assets.account(USDC_ID, selected);
+            const bal = BigInt(acc.balance.toString());
+            setUsdcBal(fmtIntWithDecimals(bal, decimals));
+          } catch (e) {
+            console.warn("USDC read failed:", e);
+            setUsdcLabel("USDC (Asset Hub)");
+            setUsdcBal("-");
+          }
+        }
 
         setStatusN("Live balance (read-only)");
       } catch (e: any) {
@@ -177,12 +217,12 @@ export function WalletPanel(props: {
       }
     }
 
-    loadBalance();
+    connectAndSubscribe();
 
     return () => {
       cancelled = true;
       try {
-        if (unsub) unsub();
+        if (unsubDot) unsubDot();
       } catch {}
       try {
         api?.disconnect();
@@ -234,16 +274,24 @@ export function WalletPanel(props: {
             <div>
               <b>Chain:</b> {chain}
             </div>
+
             <div>
-              <b>Free balance (DOT):</b> {balance}
+              <b>DOT (free):</b> {balanceDot}
             </div>
+
             <div>
-              <b>Existential Deposit (ED):</b> {ed}
+              <b>Existential Deposit (ED):</b> {edDot}
             </div>
+
+            {chain === "assethub" && (
+              <div>
+                <b>{usdcLabel}:</b> {usdcBal}
+              </div>
+            )}
           </div>
 
           <div style={{ marginTop: 10, fontSize: 13, opacity: 0.7 }}>
-            ED warning: sending too much may drop the remaining balance below ED and the account could be reaped.
+            ED warning: sending too much may drop the remaining DOT balance below ED and the account could be reaped.
           </div>
 
           <div style={{ marginTop: 12, fontSize: 13, opacity: 0.7 }}>
