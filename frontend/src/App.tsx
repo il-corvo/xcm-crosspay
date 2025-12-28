@@ -51,7 +51,7 @@ export default function App() {
 
   const errors = useMemo(() => validateRequest(req), [req]);
 
-  // Phase 1: fixed network fee estimate (placeholder)
+  // Phase 1 placeholder: fixed network fee estimate
   const networkFeeDotEst = 0.012;
 
   const amt = Number(req.amount || "0");
@@ -66,11 +66,15 @@ export default function App() {
       DEFAULT_SERVICE_FEE
     );
     if (req.asset !== "DOT") {
-      q.notes = [...q.notes, "USDC transfer: service fee is min-clamped (Phase 1)."];
+      q.notes = [
+        ...q.notes,
+        "USDC transfer: service fee is min-clamped (Phase 1).",
+      ];
     }
     return q;
   }, [req.asset, amountForServiceFeeDot]);
 
+  // Wallet safety check (ED)
   const bal = Number(wallet.balanceDot ?? "NaN");
   const ed = Number(wallet.edDot ?? "NaN");
   const feeTotal = Number(feeQuote.totalFeeDot);
@@ -90,6 +94,7 @@ export default function App() {
 
   const canDryRun = errors.length === 0 && safe;
 
+  // Only support first real submit case
   const supportsRealSubmit =
     req.from === "assethub" &&
     req.to === "hydradx" &&
@@ -104,7 +109,7 @@ export default function App() {
   };
 
   // =========================
-  // REAL SUBMIT (XCM V3)
+  // REAL SUBMIT (Asset Hub -> HydraDX, DOT)
   // =========================
   async function submitReal_AssethubToHydraDot() {
     setSubmitLog("");
@@ -152,11 +157,13 @@ export default function App() {
         );
       }
 
+      // signer injection
       const injector = await web3FromAddress(selectedAddress);
       api.setSigner(injector.signer);
 
       const HYDRADX_PARA = 2034;
 
+      // XCM versioned V3 args (matches runtime expectations)
       const dest = {
         V3: {
           parents: 1,
@@ -164,7 +171,7 @@ export default function App() {
         },
       };
 
-      const id = decodeAddress(selectedAddress);
+      const id = decodeAddress(selectedAddress); // Uint8Array(32)
       const beneficiary = {
         V3: {
           parents: 0,
@@ -176,9 +183,11 @@ export default function App() {
         },
       };
 
+      // Amount planck (DOT 10 decimals) - ok for alpha, later use decimal lib
       const amountPlanck = BigInt(Math.floor(amtNum * 10 ** 10));
       if (amountPlanck <= 0n) throw new Error("Amount too small.");
 
+      // IMPORTANT: DOT as local asset on Asset Hub => parents: 0, interior: Here
       const assets = {
         V3: [
           {
@@ -208,19 +217,86 @@ export default function App() {
 
       setSubmitLog((s) => s + "Signing & submitting...\n");
 
+      // Guard to avoid double printing dispatchError on finalized, etc.
+      let dispatchLogged = false;
+
       const unsub = await tx.signAndSend(selectedAddress, (result) => {
+        // status
         if (result.status.isInBlock) {
-          setSubmitLog((s) => s + `✅ In block: ${result.status.asInBlock.toString()}\n`);
+          setSubmitLog(
+            (s) => s + `✅ In block: ${result.status.asInBlock.toString()}\n`
+          );
         } else if (result.status.isFinalized) {
-          setSubmitLog((s) => s + `🎉 Finalized: ${result.status.asFinalized.toString()}\n`);
-          unsub();
+          setSubmitLog(
+            (s) => s + `🎉 Finalized: ${result.status.asFinalized.toString()}\n`
+          );
+          try {
+            unsub();
+          } catch {}
           api?.disconnect().catch(() => {});
           setSubmitting(false);
         } else {
           setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
         }
 
-        if (result.dispatchError) {
+        // --- EVENTS DEBUG (robust, cannot crash) ---
+        try {
+          const lines: string[] = [];
+
+          for (const { event } of result.events) {
+            const sec = event.section;
+            const met = event.method;
+
+            // Attempted contains the REAL XCM error + index
+            if (sec === "polkadotXcm" && met === "Attempted") {
+              let payload = "";
+              try {
+                payload = JSON.stringify(event.toHuman(), null, 2);
+              } catch {
+                payload = event.toString();
+              }
+              lines.push(`*** polkadotXcm.Attempted ***\n${payload}`);
+              continue;
+            }
+
+            if (
+              sec === "polkadotXcm" ||
+              sec === "xcmPallet" ||
+              sec === "xcmpQueue" ||
+              sec === "messageQueue" ||
+              sec === "dmpQueue" ||
+              sec === "balances" ||
+              sec === "system"
+            ) {
+              let payload = "";
+              try {
+                payload = JSON.stringify(event.toHuman());
+              } catch {
+                payload = event.toString();
+              }
+              lines.push(`${sec}.${met}: ${payload}`);
+            }
+          }
+
+          if (lines.length > 0) {
+            setSubmitLog(
+              (s) =>
+                s +
+                `\n--- EVENTS (debug) ---\n` +
+                lines.join("\n") +
+                `\n--- END EVENTS ---\n`
+            );
+          }
+        } catch (e: any) {
+          setSubmitLog(
+            (s) => s + `\n(event log error: ${e?.message ?? String(e)})\n`
+          );
+        }
+
+        // dispatch error
+        if (result.dispatchError && !dispatchLogged) {
+          dispatchLogged = true;
+
           let errMsg = result.dispatchError.toString();
           if (result.dispatchError.isModule) {
             const decoded = api!.registry.findMetaError(
@@ -230,41 +306,6 @@ export default function App() {
           }
           setSubmitLog((s) => s + `❌ DispatchError: ${errMsg}\n`);
         }
-
-// --- XCM EVENTS DEBUG (truth source) ---
-try {
-  const lines: string[] = [];
-
-  for (const { event } of result.events) {
-    const sec = event.section;
-    const met = event.method;
-
-    if (
-      sec === "polkadotXcm" ||
-      sec === "xcmPallet" ||
-      sec === "xcmpQueue" ||
-      sec === "messageQueue" ||
-      sec === "dmpQueue"
-    ) {
-      lines.push(`${sec}.${met}: ${JSON.stringify(event.toHuman())}`);
-    }
-  }
-
-  if (lines.length > 0) {
-    setSubmitLog(
-      (s) =>
-        s +
-        `\n--- XCM events ---\n` +
-        lines.join("\n") +
-        `\n--- end ---\n`
-    );
-  }
-} catch (e) {
-  // ignore
-}
-
-
-
       });
     } catch (e: any) {
       setSubmitLog((s) => s + `❌ Error: ${e?.message ?? String(e)}\n`);
@@ -328,7 +369,11 @@ try {
       <footer style={{ marginTop: 40, opacity: 0.6 }}>
         <p style={{ margin: 0 }}>
           Source:{" "}
-          <a href="https://github.com/il-corvo/xcm-crosspay" target="_blank" rel="noreferrer">
+          <a
+            href="https://github.com/il-corvo/xcm-crosspay"
+            target="_blank"
+            rel="noreferrer"
+          >
             GitHub (MIT)
           </a>
         </p>
