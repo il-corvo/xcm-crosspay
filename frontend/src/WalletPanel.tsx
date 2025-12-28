@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { web3Accounts, web3Enable } from "@polkadot/extension-dapp";
 import { ApiPromise, WsProvider } from "@polkadot/api";
+import { decodeAddress } from "@polkadot/util-crypto";
 
 export type ChainKey = "assethub" | "hydradx";
 
@@ -37,8 +38,8 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 
 export type WalletChainData = {
   status: string;
-  balanceDot?: string; // native free for selected chain
-  edDot?: string;      // native ED for selected chain
+  balanceDot?: string;
+  edDot?: string;
 };
 
 export function WalletPanel(props: {
@@ -54,13 +55,13 @@ export function WalletPanel(props: {
 
   const [status, setStatus] = useState<string>("Not connected");
 
-  // Native token info (DOT on Asset Hub, HDX on Hydra, etc.)
+  // Native token (DOT on Asset Hub, HDX on Hydra)
   const [nativeSymbol, setNativeSymbol] = useState<string>("NATIVE");
   const [nativeBal, setNativeBal] = useState<string>("-");
   const [nativeEd, setNativeEd] = useState<string>("-");
 
-  // USDC on Asset Hub (assetId 1337)
-  const [usdcLabel, setUsdcLabel] = useState<string>("USDC (Asset Hub)");
+  // USDC display (chain-specific)
+  const [usdcLabel, setUsdcLabel] = useState<string>("USDC");
   const [usdcBal, setUsdcBal] = useState<string>("-");
 
   const selectedAccount = useMemo(
@@ -124,7 +125,7 @@ export function WalletPanel(props: {
     if (selected) onSelectedAddress?.(selected);
   }, [selected, onSelectedAddress]);
 
-  // 2) Connect RPC + subscribe native + subscribe USDC (Asset Hub)
+  // 2) Connect RPC + subscribe native + subscribe USDC
   useEffect(() => {
     let api: ApiPromise | null = null;
 
@@ -136,12 +137,7 @@ export function WalletPanel(props: {
     async function connectAndSubscribe() {
       setNativeBal("-");
       setNativeEd("-");
-
-      // reset USDC display when not on Asset Hub
-      if (chain !== "assethub") {
-        setUsdcBal("-");
-        setUsdcLabel("USDC (Asset Hub)");
-      }
+      setUsdcBal("-");
 
       onChainData?.({ status: "Loading...", balanceDot: undefined, edDot: undefined });
 
@@ -173,9 +169,9 @@ export function WalletPanel(props: {
 
         if (cancelled) return;
 
-        const dec = (api.registry.chainDecimals?.[0] ?? 10) as number;
-        const tok = (api.registry.chainTokens?.[0] ?? "NATIVE") as string;
-        setNativeSymbol(tok);
+        const decNative = (api.registry.chainDecimals?.[0] ?? 10) as number;
+        const tokNative = (api.registry.chainTokens?.[0] ?? "NATIVE") as string;
+        setNativeSymbol(tokNative);
 
         setStatusN("Connected. Reading balances...");
 
@@ -183,7 +179,7 @@ export function WalletPanel(props: {
         const edConst = api.consts.balances?.existentialDeposit?.toString?.();
         if (edConst) {
           const edInt = BigInt(edConst);
-          const edFmt = fmtIntWithDecimals(edInt, dec);
+          const edFmt = fmtIntWithDecimals(edInt, decNative);
           setNativeEd(edFmt);
           onChainData?.({ status: "Connected. Reading balances...", edDot: edFmt });
         }
@@ -191,37 +187,48 @@ export function WalletPanel(props: {
         // Native subscribe
         unsubNative = (await api.query.system.account(selected, (info: any) => {
           const free = BigInt(info.data.free.toString());
-          const balFmt = fmtIntWithDecimals(free, dec);
+          const balFmt = fmtIntWithDecimals(free, decNative);
           setNativeBal(balFmt);
           onChainData?.({ status: "Live balance (read-only)", balanceDot: balFmt });
         })) as unknown as () => void;
 
-        // USDC subscribe ONLY on Asset Hub, using SS58 directly (proved by debug script)
+        // USDC subscribe
         if (chain === "assethub") {
-          try {
-            const USDC_ID = 1337;
+          // Asset Hub: pallet-assets USDC id 1337, SS58 works (proved)
+          const USDC_ID_AH = 1337;
 
-            const md: any = await api.query.assets.metadata(USDC_ID);
-            const usdcDecimals = Number(md.decimals?.toString?.() ?? "6");
-            const symHuman = md.symbol?.toHuman?.();
-            const sym = typeof symHuman === "string" ? symHuman : "USDC";
-            setUsdcLabel(`${sym} (Asset Hub)`);
+          const md: any = await api.query.assets.metadata(USDC_ID_AH);
+          const dec = Number(md.decimals?.toString?.() ?? "6");
+          const symHuman = md.symbol?.toHuman?.();
+          const sym = typeof symHuman === "string" ? symHuman : "USDC";
+          setUsdcLabel(`${sym} (Asset Hub)`);
 
-            unsubUsdc = (await api.query.assets.account(USDC_ID, selected, (accOpt: any) => {
-              // Option<AccountDetails> => unwrapOrDefault pattern via toHuman
-              const h = accOpt.toHuman();
-              if (h === null) {
-                setUsdcBal("0");
-                return;
-              }
-              const bal = BigInt(accOpt.unwrap().balance.toString());
-              setUsdcBal(fmtIntWithDecimals(bal, usdcDecimals));
-            })) as unknown as () => void;
-          } catch (e) {
-            console.warn("USDC subscribe failed:", e);
-            setUsdcLabel("USDC (Asset Hub)");
-            setUsdcBal("-");
-          }
+          unsubUsdc = (await api.query.assets.account(USDC_ID_AH, selected, (accOpt: any) => {
+            const h = accOpt.toHuman();
+            if (h === null) {
+              setUsdcBal("0");
+              return;
+            }
+            const bal = BigInt(accOpt.unwrap().balance.toString());
+            setUsdcBal(fmtIntWithDecimals(bal, dec));
+          })) as unknown as () => void;
+        } else {
+          // Hydra/Hydration: ORML tokens + assetRegistry
+          // We detected USDC assetId = 22 in assetRegistry.assets
+          const USDC_ID_HYDRA = 22;
+
+          const who = decodeAddress(selected);
+
+          const a: any = await api.query.assetRegistry.assets(USDC_ID_HYDRA);
+          const human = a.toHuman() as any;
+          const dec = Number(human?.decimals ?? "6");
+          const sym = String(human?.symbol ?? "USDC");
+          setUsdcLabel(`${sym} (Hydra)`);
+
+          unsubUsdc = (await api.query.tokens.accounts(who, USDC_ID_HYDRA, (acc: any) => {
+            const free = BigInt(acc.free.toString());
+            setUsdcBal(fmtIntWithDecimals(free, dec));
+          })) as unknown as () => void;
         }
 
         setStatusN("Live balance (read-only)");
@@ -234,7 +241,6 @@ export function WalletPanel(props: {
 
     return () => {
       cancelled = true;
-
       try { if (unsubNative) unsubNative(); } catch {}
       try { if (unsubUsdc) unsubUsdc(); } catch {}
       try { api?.disconnect(); } catch {}
@@ -261,8 +267,8 @@ export function WalletPanel(props: {
 
       {!extEnabled && (
         <div style={{ marginBottom: 10, opacity: 0.8 }}>
-          Install/enable a Polkadot wallet extension (polkadot{".js"}, Talisman, SubWallet, etc.)
-          and authorize this site.
+          Install/enable a Polkadot wallet extension (polkadot{".js"}, Talisman, SubWallet, etc.) and
+          authorize this site.
         </div>
       )}
 
@@ -290,10 +296,7 @@ export function WalletPanel(props: {
             <div><b>Chain:</b> {chain}</div>
             <div><b>{nativeSymbol} (free):</b> {nativeBal}</div>
             <div><b>Existential Deposit (ED):</b> {nativeEd} <span style={{ opacity: 0.6 }}>(native)</span></div>
-
-            {chain === "assethub" && (
-              <div><b>{usdcLabel}:</b> {usdcBal}</div>
-            )}
+            <div><b>{usdcLabel}:</b> {usdcBal}</div>
           </div>
 
           <div style={{ marginTop: 10, fontSize: 13, opacity: 0.7 }}>{edHelp}</div>
