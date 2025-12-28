@@ -9,6 +9,15 @@ real-world usage and feedback.
 
 ---
 
+## 🌐 Live dApp
+
+👉 **Try the dApp:**  
+https://il-corvo.github.io/xcm-crosspay/
+
+> Public alpha. Non-custodial. Use small amounts.
+
+---
+
 ## ⚠️ Alpha status
 
 This software is in **public alpha**.
