@@ -56,6 +56,76 @@ function makeFeeQuoteNoService(networkFeeDotEst: number): FeeQuote {
   };
 }
 
+async function connectApiWithFallback(
+  rpcs: string[],
+  setLog: (fn: (s: string) => string) => void
+): Promise<ApiPromise> {
+  setLog((s) => s + "Connecting RPC (fallback mode)\n");
+  let lastErr: any = null;
+
+  for (const rpc of rpcs) {
+    try {
+      setLog((s) => s + `→ Trying: ${rpc}\n`);
+      const api = await withTimeout(
+        ApiPromise.create({ provider: new WsProvider(rpc) }),
+        8000
+      );
+      setLog((s) => s + `✅ Connected: ${rpc}\n`);
+      return api;
+    } catch (e: any) {
+      lastErr = e;
+      setLog((s) => s + `✗ Failed: ${rpc} (${e?.message ?? String(e)})\n`);
+    }
+  }
+
+  throw new Error(
+    `All RPC endpoints failed. Last error: ${lastErr?.message ?? String(lastErr)}`
+  );
+}
+
+function logAttemptedAndSomeEvents(api: ApiPromise, result: any, setLog: (fn: (s: string) => string) => void) {
+  try {
+    const lines: string[] = [];
+
+    for (const { event } of result.events) {
+      const sec = event.section;
+      const met = event.method;
+
+      if (sec === "polkadotXcm" && met === "Attempted") {
+        let payload = "";
+        try {
+          payload = JSON.stringify(event.toHuman(), null, 2);
+        } catch {
+          payload = event.toString();
+        }
+        lines.push(`*** polkadotXcm.Attempted ***\n${payload}`);
+      } else if (
+        sec === "polkadotXcm" ||
+        sec === "xcmpQueue" ||
+        sec === "messageQueue" ||
+        sec === "balances" ||
+        sec === "assets" ||
+        sec === "system"
+      ) {
+        // keep it readable, not too spammy
+        let payload = "";
+        try {
+          payload = JSON.stringify(event.toHuman());
+        } catch {
+          payload = event.toString();
+        }
+        lines.push(`${sec}.${met}: ${payload}`);
+      }
+    }
+
+    if (lines.length) {
+      setLog((s) => s + `\n--- EVENTS (debug) ---\n${lines.join("\n")}\n--- END EVENTS ---\n`);
+    }
+  } catch {
+    // ignore
+  }
+}
+
 export default function App() {
   const buildSha = import.meta.env.VITE_BUILD_SHA ?? "dev";
 
@@ -78,15 +148,15 @@ export default function App() {
   const [submitLog, setSubmitLog] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
 
-  // Step 1.1: guard - enforce from != to in state
-const guardedReq = useMemo<TransferRequest>(() => {
-  if (req.from !== req.to) return req;
+  // Guard: enforce from != to
+  const guardedReq = useMemo<TransferRequest>(() => {
+    if (req.from !== req.to) return req;
 
-  const nextTo: TransferRequest["to"] =
-    req.from === "assethub" ? "hydradx" : "assethub";
+    const nextTo: TransferRequest["to"] =
+      req.from === "assethub" ? "hydradx" : "assethub";
 
-  return { ...req, to: nextTo };
-}, [req]);
+    return { ...req, to: nextTo };
+  }, [req]);
 
   const errors = useMemo(() => validateRequest(guardedReq), [guardedReq]);
 
@@ -96,8 +166,6 @@ const guardedReq = useMemo<TransferRequest>(() => {
   const amt = Number(guardedReq.amount || "0");
   const amtNum = Number.isFinite(amt) ? amt : 0;
 
-  // Service fee base:
-  // - only proportional on DOT transfers
   const amountForServiceFeeDot = guardedReq.asset === "DOT" ? amtNum : 0;
 
   const feeQuote = useMemo(() => {
@@ -110,7 +178,7 @@ const guardedReq = useMemo<TransferRequest>(() => {
     return q;
   }, [serviceFeeEnabled, amountForServiceFeeDot, guardedReq.asset]);
 
-  // Wallet safety check (ED) based on native token on FROM chain (Asset Hub: DOT, Hydra: HDX)
+  // Safety check based on native token on FROM chain (Asset Hub: DOT, Hydra: HDX)
   const balNative = Number(wallet.balanceDot ?? "NaN");
   const edNative = Number(wallet.edDot ?? "NaN");
   const feeTotal = Number(feeQuote.totalFeeDot);
@@ -118,9 +186,6 @@ const guardedReq = useMemo<TransferRequest>(() => {
   const hasWalletNums =
     Number.isFinite(balNative) && Number.isFinite(edNative) && Number.isFinite(feeTotal);
 
-  // Required native token depends on asset:
-  // - DOT transfer from AssetHub uses DOT amount + fees
-  // - USDC transfers consume only native fees, must keep ED
   const requiredNative = guardedReq.asset === "DOT" ? amtNum + feeTotal : feeTotal;
 
   const remaining = hasWalletNums ? balNative - requiredNative : NaN;
@@ -134,82 +199,65 @@ const guardedReq = useMemo<TransferRequest>(() => {
 
   const canPreview = errors.length === 0 && safe;
 
-  // Step 1.1 UX warning: Hydra with 0 HDX
   const hydraFeeWarning =
     guardedReq.from === "hydradx" && Number(wallet.balanceDot ?? "0") === 0
-      ? "Hydra has 0 HDX. You can receive assets, but you need some HDX to send transactions (fees)."
+      ? "Hydra has 0 HDX. You can receive assets, but you need HDX to send transactions (fees)."
       : undefined;
 
-  // Real submit scope (current): USDC Asset Hub -> HydraDX only
-  const supportsRealSubmit =
+  // --- Real submit support (current scope) ---
+  const supportsUsdcReserve =
     guardedReq.from === "assethub" &&
     guardedReq.to === "hydradx" &&
     guardedReq.asset === "USDC_AH" &&
     selectedAddress.length > 0 &&
     (guardedReq.amount ?? "").trim().length > 0;
 
-  const canSubmitReal = canPreview && supportsRealSubmit && !submitting;
+  const supportsDotTeleport =
+    guardedReq.from === "assethub" &&
+    guardedReq.to === "hydradx" &&
+    guardedReq.asset === "DOT" &&
+    selectedAddress.length > 0 &&
+    (guardedReq.amount ?? "").trim().length > 0;
+
+  const canSubmitReal =
+    canPreview && (supportsUsdcReserve || supportsDotTeleport) && !submitting;
+
+  const submitHelp = supportsDotTeleport
+    ? "Real submit: DOT teleport Asset Hub → HydraDX."
+    : supportsUsdcReserve
+    ? "Real submit: USDC (Asset Hub) reserve transfer → HydraDX."
+    : "Real submit currently supports: DOT (teleport) or USDC (Asset Hub reserve transfer) from Asset Hub → HydraDX.";
 
   const handleDryRun = () => {
     setDryRun(buildXcmDryRun(guardedReq, feeQuote));
   };
 
-  async function submitReal_AssethubToHydra_USDC() {
+  // --- REAL SUBMIT: USDC reserve transfer (Asset Hub -> HydraDX) ---
+  async function submitUsdcReserve() {
     setSubmitLog("");
     setSubmitting(true);
 
     try {
-      if (!supportsRealSubmit) {
-        throw new Error("Real submit currently supports: USDC (Asset Hub) → HydraDX.");
-      }
-      if (!canPreview) {
-        throw new Error("Form is not safe/valid yet.");
-      }
-
       const RPCS = [
-        "wss://asset-hub-polkadot-rpc.dwellir.com",
         "wss://polkadot-asset-hub-rpc.polkadot.io",
         "wss://rpc-asset-hub-polkadot.luckyfriday.io",
-        "wss://asset-hub-polkadot-rpc.dwellir.com/ws",
+        "wss://asset-hub-polkadot-rpc.dwellir.com", // last (unstable)
         "wss://polkadot-asset-hub-rpc.polkadot.io/ws",
+        "wss://asset-hub-polkadot-rpc.dwellir.com/ws",
       ];
 
-      setSubmitLog((s) => s + "Connecting to Asset Hub RPC (fallback mode)\n");
-
-      let api: ApiPromise | null = null;
-      let lastErr: any = null;
-
-      for (const rpc of RPCS) {
-        try {
-          setSubmitLog((s) => s + `→ Trying: ${rpc}\n`);
-          api = await withTimeout(ApiPromise.create({ provider: new WsProvider(rpc) }), 8000);
-          setSubmitLog((s) => s + `✅ Connected: ${rpc}\n`);
-          break;
-        } catch (e: any) {
-          lastErr = e;
-          setSubmitLog((s) => s + `✗ Failed: ${rpc} (${e?.message ?? String(e)})\n`);
-        }
-      }
-
-      if (!api) {
-        throw new Error(`All Asset Hub RPC endpoints failed. Last error: ${lastErr?.message ?? String(lastErr)}`);
-      }
+      const api = await connectApiWithFallback(RPCS, setSubmitLog);
 
       const injector = await web3FromAddress(selectedAddress);
       api.setSigner(injector.signer);
 
       const HYDRADX_PARA = 2034;
 
-      const dest = {
-        V3: { parents: 1, interior: { X1: { Parachain: HYDRADX_PARA } } },
-      };
+      const dest = { V3: { parents: 1, interior: { X1: { Parachain: HYDRADX_PARA } } } };
 
       const id = decodeAddress(selectedAddress);
       const beneficiary = {
-        V3: {
-          parents: 0,
-          interior: { X1: { AccountId32: { network: null, id } } },
-        },
+        V3: { parents: 0, interior: { X1: { AccountId32: { network: null, id } } } },
       };
 
       const USDC_ID_AH = 1337;
@@ -223,7 +271,7 @@ const guardedReq = useMemo<TransferRequest>(() => {
       const amountInt = parseDecimalToInt(guardedReq.amount, decimals);
       if (amountInt <= 0n) throw new Error("Amount too small (after decimals).");
 
-      // NOTE: V3 X2 must be an array/tuple, not {col0,col1}
+      // V3 X2 must be array/tuple
       const assets = {
         V3: [
           {
@@ -231,9 +279,7 @@ const guardedReq = useMemo<TransferRequest>(() => {
             id: {
               Concrete: {
                 parents: 0,
-                interior: {
-                  X2: [{ PalletInstance: 50 }, { GeneralIndex: String(USDC_ID_AH) }],
-                },
+                interior: { X2: [{ PalletInstance: 50 }, { GeneralIndex: String(USDC_ID_AH) }] },
               },
             },
           },
@@ -261,34 +307,19 @@ const guardedReq = useMemo<TransferRequest>(() => {
         } else if (result.status.isFinalized) {
           setSubmitLog((s) => s + `🎉 Finalized: ${result.status.asFinalized.toString()}\n`);
           try { unsub(); } catch {}
-          api?.disconnect().catch(() => {});
+          api.disconnect().catch(() => {});
           setSubmitting(false);
         } else {
           setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
         }
 
-        // Attempted is the truth source
-        try {
-          const lines: string[] = [];
-          for (const { event } of result.events) {
-            const sec = event.section;
-            const met = event.method;
-            if (sec === "polkadotXcm" && met === "Attempted") {
-              let payload = "";
-              try { payload = JSON.stringify(event.toHuman(), null, 2); } catch { payload = event.toString(); }
-              lines.push(`*** polkadotXcm.Attempted ***\n${payload}`);
-            }
-          }
-          if (lines.length) {
-            setSubmitLog((s) => s + `\n--- EVENTS (debug) ---\n${lines.join("\n")}\n--- END EVENTS ---\n`);
-          }
-        } catch {}
+        logAttemptedAndSomeEvents(api, result, setSubmitLog);
 
         if (result.dispatchError && !dispatchLogged) {
           dispatchLogged = true;
           let errMsg = result.dispatchError.toString();
           if (result.dispatchError.isModule) {
-            const decoded = api!.registry.findMetaError(result.dispatchError.asModule);
+            const decoded = api.registry.findMetaError(result.dispatchError.asModule);
             errMsg = `${decoded.section}.${decoded.name}: ${decoded.docs.join(" ")}`;
           }
           setSubmitLog((s) => s + `❌ DispatchError: ${errMsg}\n`);
@@ -298,6 +329,119 @@ const guardedReq = useMemo<TransferRequest>(() => {
       setSubmitLog((s) => s + `❌ Error: ${e?.message ?? String(e)}\n`);
       setSubmitting(false);
     }
+  }
+
+  // --- REAL SUBMIT: DOT teleport (Asset Hub -> HydraDX) ---
+  async function submitDotTeleport() {
+    setSubmitLog("");
+    setSubmitting(true);
+
+    try {
+      const RPCS = [
+        "wss://polkadot-asset-hub-rpc.polkadot.io",
+        "wss://rpc-asset-hub-polkadot.luckyfriday.io",
+        "wss://asset-hub-polkadot-rpc.dwellir.com", // last
+        "wss://polkadot-asset-hub-rpc.polkadot.io/ws",
+        "wss://asset-hub-polkadot-rpc.dwellir.com/ws",
+      ];
+
+      const api = await connectApiWithFallback(RPCS, setSubmitLog);
+
+      const injector = await web3FromAddress(selectedAddress);
+      api.setSigner(injector.signer);
+
+      const HYDRADX_PARA = 2034;
+
+      // V4 format (matches real-world examples): X1 is an array of junctions
+      const dest = {
+        V4: {
+          parents: 1,
+          interior: {
+            X1: [{ Parachain: HYDRADX_PARA }],
+          },
+        },
+      };
+
+      const id = decodeAddress(selectedAddress);
+      const beneficiary = {
+        V4: {
+          parents: 0,
+          interior: {
+            X1: [
+              {
+                AccountId32: { network: null, id },
+              },
+            ],
+          },
+        },
+      };
+
+      // DOT as relay-asset for teleport: parents: 1, interior Here (V4 style)
+      const DOT_DECIMALS = 10;
+      const amountInt = parseDecimalToInt(guardedReq.amount, DOT_DECIMALS);
+      if (amountInt <= 0n) throw new Error("Amount too small.");
+
+      const assets = {
+        V4: [
+          {
+            fun: { Fungible: amountInt.toString() },
+            id: {
+              parents: 1,
+              interior: { Here: null },
+            },
+          },
+        ],
+      };
+
+      const feeAssetItem = 0;
+      const weightLimit = { Unlimited: null };
+
+      const tx = api.tx.polkadotXcm.limitedTeleportAssets(
+        dest as any,
+        beneficiary as any,
+        assets as any,
+        feeAssetItem,
+        weightLimit as any
+      );
+
+      setSubmitLog((s) => s + "Signing & submitting...\n");
+
+      let dispatchLogged = false;
+
+      const unsub = await tx.signAndSend(selectedAddress, (result) => {
+        if (result.status.isInBlock) {
+          setSubmitLog((s) => s + `✅ In block: ${result.status.asInBlock.toString()}\n`);
+        } else if (result.status.isFinalized) {
+          setSubmitLog((s) => s + `🎉 Finalized: ${result.status.asFinalized.toString()}\n`);
+          try { unsub(); } catch {}
+          api.disconnect().catch(() => {});
+          setSubmitting(false);
+        } else {
+          setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
+        }
+
+        logAttemptedAndSomeEvents(api, result, setSubmitLog);
+
+        if (result.dispatchError && !dispatchLogged) {
+          dispatchLogged = true;
+          let errMsg = result.dispatchError.toString();
+          if (result.dispatchError.isModule) {
+            const decoded = api.registry.findMetaError(result.dispatchError.asModule);
+            errMsg = `${decoded.section}.${decoded.name}: ${decoded.docs.join(" ")}`;
+          }
+          setSubmitLog((s) => s + `❌ DispatchError: ${errMsg}\n`);
+        }
+      });
+    } catch (e: any) {
+      setSubmitLog((s) => s + `❌ Error: ${e?.message ?? String(e)}\n`);
+      setSubmitting(false);
+    }
+  }
+
+  async function submitReal() {
+    if (supportsDotTeleport) return submitDotTeleport();
+    if (supportsUsdcReserve) return submitUsdcReserve();
+    setSubmitLog("❌ Unsupported real submit combination.\n");
   }
 
   return (
@@ -330,12 +474,8 @@ const guardedReq = useMemo<TransferRequest>(() => {
         onDryRun={handleDryRun}
         dryRun={dryRun}
         canSubmitReal={canSubmitReal}
-        onSubmitReal={submitReal_AssethubToHydra_USDC}
-        submitHelp={
-          supportsRealSubmit
-            ? "Real submit enabled for USDC (Asset Hub) → HydraDX."
-            : "Real submit currently supports only: USDC (Asset Hub) → HydraDX."
-        }
+        onSubmitReal={submitReal}
+        submitHelp={submitHelp}
         warning={hydraFeeWarning}
       />
 
