@@ -83,7 +83,10 @@ async function connectApiWithFallback(
   );
 }
 
-function logAttemptedAndSomeEvents(api: ApiPromise, result: any, setLog: (fn: (s: string) => string) => void) {
+function logAttemptedAndSomeEvents(
+  result: any,
+  setLog: (fn: (s: string) => string) => void
+) {
   try {
     const lines: string[] = [];
 
@@ -313,8 +316,7 @@ export default function App() {
           setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
         }
 
-        logAttemptedAndSomeEvents(api, result, setSubmitLog);
-
+logAttemptedAndSomeEvents(result, setSubmitLog);
         if (result.dispatchError && !dispatchLogged) {
           dispatchLogged = true;
           let errMsg = result.dispatchError.toString();
