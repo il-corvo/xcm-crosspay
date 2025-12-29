@@ -422,7 +422,7 @@ logAttemptedAndSomeEvents(result, setSubmitLog);
           setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
         }
 
-        logAttemptedAndSomeEvents(api, result, setSubmitLog);
+        logAttemptedAndSomeEvents(result, setSubmitLog);
 
         if (result.dispatchError && !dispatchLogged) {
           dispatchLogged = true;
