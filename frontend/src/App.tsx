@@ -139,8 +139,6 @@ export default function App() {
 
   const networkFeeDotEst = 0.012;
 
-  const amt = Number(req.amount || "0");
-  const amtNum = Number.isFinite(amt) ? amt : 0;
 
   const feeQuote = useMemo(() => {
     if (!serviceFeeEnabled) return makeFeeQuoteNoService(networkFeeDotEst);
