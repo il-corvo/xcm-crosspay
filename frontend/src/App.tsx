@@ -201,7 +201,8 @@ export default function App() {
     Number.isFinite(edNative) &&
     Number.isFinite(feeTotal);
 
-  const requiredNative = guardedReq.asset === "DOT" ? amtNum + feeTotal : feeTotal;
+  const requiredNative =
+    guardedReq.asset === "DOT" ? amtNum + feeTotal : feeTotal;
 
   const remaining = hasWalletNums ? balNative - requiredNative : NaN;
   const safe = hasWalletNums ? remaining >= edNative : false;
@@ -227,20 +228,21 @@ export default function App() {
     selectedAddress.length > 0 &&
     (guardedReq.amount ?? "").trim().length > 0;
 
-  const supportsDotReserve =
+  const supportsDotTransferAssets =
     guardedReq.from === "assethub" &&
     guardedReq.to === "hydradx" &&
     guardedReq.asset === "DOT" &&
     selectedAddress.length > 0 &&
     (guardedReq.amount ?? "").trim().length > 0;
 
-  const canSubmitReal = canPreview && (supportsUsdcReserve || supportsDotReserve) && !submitting;
+  const canSubmitReal =
+    canPreview && (supportsUsdcReserve || supportsDotTransferAssets) && !submitting;
 
-  const submitHelp = supportsDotReserve
-    ? "Real submit: DOT reserve transfer (DOT as parent asset) Asset Hub → HydraDX."
+  const submitHelp = supportsDotTransferAssets
+    ? "Real submit: DOT via polkadotXcm.transferAssets (Asset Hub → HydraDX)."
     : supportsUsdcReserve
     ? "Real submit: USDC (Asset Hub) reserve transfer → HydraDX."
-    : "Real submit supports: DOT (reserve transfer) or USDC (Asset Hub reserve transfer) from Asset Hub → HydraDX.";
+    : "Real submit supports: DOT (transferAssets) or USDC (Asset Hub reserve transfer) from Asset Hub → HydraDX.";
 
   const handleDryRun = () => {
     setDryRun(buildXcmDryRun(guardedReq, feeQuote));
@@ -351,7 +353,8 @@ export default function App() {
     }
   }
 
-  async function submitDotReserve() {
+  // DOT submit via transferAssets (not teleport, not limitedReserveTransferAssets)
+  async function submitDotTransferAssets() {
     setSubmitLog("");
     setSubmitting(true);
 
@@ -363,50 +366,46 @@ export default function App() {
 
       const HYDRADX_PARA = 2034;
 
+      // Use V4 shapes (modern, matches examples)
       const dest = {
-        V3: { parents: 1, interior: { X1: { Parachain: HYDRADX_PARA } } },
+        V4: {
+          parents: 1,
+          interior: { X1: [{ Parachain: HYDRADX_PARA }] },
+        },
       };
 
       const id = decodeAddress(selectedAddress);
       const beneficiary = {
-        V3: {
+        V4: {
           parents: 0,
-          interior: { X1: { AccountId32: { network: null, id } } },
+          interior: { X1: [{ AccountId32: { network: null, id } }] },
         },
       };
 
-      // DOT amount in planck (10 decimals)
+      // DOT relay asset
       const DOT_DECIMALS = 10;
       const amountInt = parseDecimalToInt(guardedReq.amount, DOT_DECIMALS);
       if (amountInt <= 0n) throw new Error("Amount too small.");
 
-      // DOT as parent asset (Relay): parents=1, interior=Here
       const assets = {
-        V3: [
+        V4: [
           {
             fun: { Fungible: amountInt.toString() },
-            id: {
-              Concrete: {
-                parents: 1,
-                interior: "Here",
-              },
-            },
+            id: { parents: 1, interior: { Here: null } },
           },
         ],
       };
 
       const feeAssetItem = 0;
-      const weightLimit = { Unlimited: null };
 
-      const tx = api.tx.polkadotXcm.limitedReserveTransferAssets(
+      const tx = api.tx.polkadotXcm.transferAssets(
         dest as any,
         beneficiary as any,
         assets as any,
-        feeAssetItem,
-        weightLimit as any
+        feeAssetItem
       );
 
-      setSubmitLog((s) => s + "Submitting DOT via reserve transfer (parents:1 Here)\n");
+      setSubmitLog((s) => s + "Submitting DOT via polkadotXcm.transferAssets\n");
       setSubmitLog((s) => s + "Signing & submitting...\n");
 
       let dispatchLogged = false;
@@ -442,7 +441,7 @@ export default function App() {
   }
 
   async function submitReal() {
-    if (supportsDotReserve) return submitDotReserve();
+    if (supportsDotTransferAssets) return submitDotTransferAssets();
     if (supportsUsdcReserve) return submitUsdcReserve();
     setSubmitLog("❌ Unsupported real submit combination.\n");
   }
