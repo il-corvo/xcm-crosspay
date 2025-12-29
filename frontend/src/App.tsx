@@ -29,7 +29,6 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   });
 }
 
-// Parse decimal to BigInt (no float) with decimals
 function parseDecimalToInt(amount: string, decimals: number): bigint {
   const s = (amount ?? "").trim();
   if (!s) return 0n;
@@ -89,18 +88,13 @@ function logAttemptedAndSomeEvents(
 ) {
   try {
     const lines: string[] = [];
-
     for (const { event } of result.events) {
       const sec = event.section;
       const met = event.method;
 
       if (sec === "polkadotXcm" && met === "Attempted") {
         let payload = "";
-        try {
-          payload = JSON.stringify(event.toHuman(), null, 2);
-        } catch {
-          payload = event.toString();
-        }
+        try { payload = JSON.stringify(event.toHuman(), null, 2); } catch { payload = event.toString(); }
         lines.push(`*** polkadotXcm.Attempted ***\n${payload}`);
       } else if (
         sec === "polkadotXcm" ||
@@ -111,27 +105,15 @@ function logAttemptedAndSomeEvents(
         sec === "system"
       ) {
         let payload = "";
-        try {
-          payload = JSON.stringify(event.toHuman());
-        } catch {
-          payload = event.toString();
-        }
+        try { payload = JSON.stringify(event.toHuman()); } catch { payload = event.toString(); }
         lines.push(`${sec}.${met}: ${payload}`);
       }
     }
 
     if (lines.length) {
-      setLog(
-        (s) =>
-          s +
-          `\n--- EVENTS (debug) ---\n` +
-          lines.join("\n") +
-          `\n--- END EVENTS ---\n`
-      );
+      setLog((s) => s + `\n--- EVENTS (debug) ---\n${lines.join("\n")}\n--- END EVENTS ---\n`);
     }
-  } catch {
-    // ignore
-  }
+  } catch {}
 }
 
 export default function App() {
@@ -146,122 +128,76 @@ export default function App() {
 
   const [serviceFeeEnabled, setServiceFeeEnabled] = useState(true);
 
-  const [wallet, setWallet] = useState<WalletChainData>({
-    status: "Not connected",
-  });
-
+  const [wallet, setWallet] = useState<WalletChainData>({ status: "Not connected" });
   const [selectedAddress, setSelectedAddress] = useState<string>("");
 
   const [dryRun, setDryRun] = useState<XcmDryRun | undefined>(undefined);
   const [submitLog, setSubmitLog] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
 
-  // Guard: enforce from != to
-  const guardedReq = useMemo<TransferRequest>(() => {
-    if (req.from !== req.to) return req;
-    const nextTo: TransferRequest["to"] =
-      req.from === "assethub" ? "hydradx" : "assethub";
-    return { ...req, to: nextTo };
-  }, [req]);
+  const errors = useMemo(() => validateRequest(req), [req]);
 
-  const errors = useMemo(() => validateRequest(guardedReq), [guardedReq]);
-
-  // Phase 1: fixed network fee estimate (placeholder)
   const networkFeeDotEst = 0.012;
 
-  const amt = Number(guardedReq.amount || "0");
+  const amt = Number(req.amount || "0");
   const amtNum = Number.isFinite(amt) ? amt : 0;
-
-  const amountForServiceFeeDot = guardedReq.asset === "DOT" ? amtNum : 0;
 
   const feeQuote = useMemo(() => {
     if (!serviceFeeEnabled) return makeFeeQuoteNoService(networkFeeDotEst);
-
-    const q = quoteFeesDot(
-      amountForServiceFeeDot,
-      networkFeeDotEst,
-      DEFAULT_SERVICE_FEE
-    );
-    if (guardedReq.asset === "USDC_AH" || guardedReq.asset === "USDC_HYDRA") {
-      q.notes = [
-        ...q.notes,
-        "USDC transfer: service fee is min-clamped when enabled.",
-      ];
-    }
+    // For USDC we keep service fee min-clamped (when enabled)
+    const q = quoteFeesDot(0, networkFeeDotEst, DEFAULT_SERVICE_FEE);
+    q.notes = [...q.notes, "USDC transfer: service fee is min-clamped when enabled."];
     return q;
-  }, [serviceFeeEnabled, amountForServiceFeeDot, guardedReq.asset]);
+  }, [serviceFeeEnabled]);
 
-  // Safety check based on native token on FROM chain (Asset Hub: DOT, Hydra: HDX)
-  const balNative = Number(wallet.balanceDot ?? "NaN");
+  const balNative = Number(wallet.balanceDot ?? "NaN"); // DOT on Asset Hub
   const edNative = Number(wallet.edDot ?? "NaN");
   const feeTotal = Number(feeQuote.totalFeeDot);
 
-  const hasWalletNums =
-    Number.isFinite(balNative) &&
-    Number.isFinite(edNative) &&
-    Number.isFinite(feeTotal);
-
-  const requiredNative =
-    guardedReq.asset === "DOT" ? amtNum + feeTotal : feeTotal;
-
-  const remaining = hasWalletNums ? balNative - requiredNative : NaN;
+  const hasWalletNums = Number.isFinite(balNative) && Number.isFinite(edNative) && Number.isFinite(feeTotal);
+  const remaining = hasWalletNums ? balNative - feeTotal : NaN;
   const safe = hasWalletNums ? remaining >= edNative : false;
 
   const safetyMsg = !hasWalletNums
     ? "Wallet data not ready yet."
     : safe
-    ? `OK: remaining native ≈ ${remaining.toFixed(6)} (ED ${edNative}).`
+    ? `OK: remaining DOT ≈ ${remaining.toFixed(6)} (ED ${edNative}).`
     : `Too much: would leave ≈ ${remaining.toFixed(6)} (below ED ${edNative}).`;
 
   const canPreview = errors.length === 0 && safe;
 
-  const hydraFeeWarning =
-    guardedReq.from === "hydradx" && Number(wallet.balanceDot ?? "0") === 0
-      ? "Hydra has 0 HDX. You can receive assets, but you need HDX to send transactions (fees)."
-      : undefined;
-
-  // Real submit support (Asset Hub -> Hydra only)
-  const supportsUsdcReserve =
-    guardedReq.from === "assethub" &&
-    guardedReq.to === "hydradx" &&
-    guardedReq.asset === "USDC_AH" &&
+  const supportsRealSubmit =
+    req.from === "assethub" &&
+    req.to === "hydradx" &&
+    req.asset === "USDC_AH" &&
     selectedAddress.length > 0 &&
-    (guardedReq.amount ?? "").trim().length > 0;
+    (req.amount ?? "").trim().length > 0;
 
-  const supportsDotTransferAssets =
-    guardedReq.from === "assethub" &&
-    guardedReq.to === "hydradx" &&
-    guardedReq.asset === "DOT" &&
-    selectedAddress.length > 0 &&
-    (guardedReq.amount ?? "").trim().length > 0;
+  const canSubmitReal = canPreview && supportsRealSubmit && !submitting;
 
-  const canSubmitReal =
-    canPreview && (supportsUsdcReserve || supportsDotTransferAssets) && !submitting;
+  const submitHelp =
+    supportsRealSubmit
+      ? "Real submit enabled: USDC (Asset Hub) → HydraDX."
+      : "Real submit currently supports only: USDC (Asset Hub) → HydraDX.";
 
-  const submitHelp = supportsDotTransferAssets
-    ? "Real submit: DOT via polkadotXcm.transferAssets (Asset Hub → HydraDX)."
-    : supportsUsdcReserve
-    ? "Real submit: USDC (Asset Hub) reserve transfer → HydraDX."
-    : "Real submit supports: DOT (transferAssets) or USDC (Asset Hub reserve transfer) from Asset Hub → HydraDX.";
-
-  const handleDryRun = () => {
-    setDryRun(buildXcmDryRun(guardedReq, feeQuote));
-  };
-
-  // Asset Hub RPC list: Dwellir LAST (as requested)
   const ASSET_HUB_RPCS = [
     "wss://polkadot-asset-hub-rpc.polkadot.io",
     "wss://rpc-asset-hub-polkadot.luckyfriday.io",
     "wss://polkadot-asset-hub-rpc.polkadot.io/ws",
-    "wss://asset-hub-polkadot-rpc.dwellir.com",
+    "wss://asset-hub-polkadot-rpc.dwellir.com", // last
     "wss://asset-hub-polkadot-rpc.dwellir.com/ws",
   ];
 
-  async function submitUsdcReserve() {
+  const onDryRun = () => setDryRun(buildXcmDryRun(req, feeQuote));
+
+  async function onSubmitReal() {
     setSubmitLog("");
     setSubmitting(true);
 
     try {
+      if (!supportsRealSubmit) throw new Error("Unsupported route/asset for real submit (Phase safe-mode).");
+      if (!canPreview) throw new Error("Form is not safe/valid yet.");
+
       const api = await connectApiWithFallback(ASSET_HUB_RPCS, setSubmitLog);
 
       const injector = await web3FromAddress(selectedAddress);
@@ -269,27 +205,19 @@ export default function App() {
 
       const HYDRADX_PARA = 2034;
 
-      const dest = {
-        V3: { parents: 1, interior: { X1: { Parachain: HYDRADX_PARA } } },
-      };
+      const dest = { V3: { parents: 1, interior: { X1: { Parachain: HYDRADX_PARA } } } };
 
       const id = decodeAddress(selectedAddress);
-      const beneficiary = {
-        V3: {
-          parents: 0,
-          interior: { X1: { AccountId32: { network: null, id } } },
-        },
-      };
+      const beneficiary = { V3: { parents: 0, interior: { X1: { AccountId32: { network: null, id } } } } };
 
       const USDC_ID_AH = 1337;
-
       const md: any = await api.query.assets.metadata(USDC_ID_AH);
       const decimals: number = Number(md.decimals?.toString?.() ?? "6");
       const symbol: string = String(md.symbol?.toHuman?.() ?? "USDC");
 
       setSubmitLog((s) => s + `Asset: ${symbol} (id ${USDC_ID_AH}, decimals ${decimals})\n`);
 
-      const amountInt = parseDecimalToInt(guardedReq.amount, decimals);
+      const amountInt = parseDecimalToInt(req.amount, decimals);
       if (amountInt <= 0n) throw new Error("Amount too small (after decimals).");
 
       const assets = {
@@ -299,9 +227,7 @@ export default function App() {
             id: {
               Concrete: {
                 parents: 0,
-                interior: {
-                  X2: [{ PalletInstance: 50 }, { GeneralIndex: String(USDC_ID_AH) }],
-                },
+                interior: { X2: [{ PalletInstance: 50 }, { GeneralIndex: String(USDC_ID_AH) }] },
               },
             },
           },
@@ -311,13 +237,7 @@ export default function App() {
       const feeAssetItem = 0;
       const weightLimit = { Unlimited: null };
 
-      const tx = api.tx.polkadotXcm.limitedReserveTransferAssets(
-        dest as any,
-        beneficiary as any,
-        assets as any,
-        feeAssetItem,
-        weightLimit as any
-      );
+      const tx = api.tx.polkadotXcm.limitedReserveTransferAssets(dest as any, beneficiary as any, assets as any, feeAssetItem, weightLimit as any);
 
       setSubmitLog((s) => s + "Signing & submitting...\n");
 
@@ -351,102 +271,6 @@ export default function App() {
       setSubmitLog((s) => s + `❌ Error: ${e?.message ?? String(e)}\n`);
       setSubmitting(false);
     }
-  }
-
-  // DOT submit via transferAssets (not teleport, not limitedReserveTransferAssets)
-  async function submitDotTransferAssets() {
-    setSubmitLog("");
-    setSubmitting(true);
-
-    try {
-      const api = await connectApiWithFallback(ASSET_HUB_RPCS, setSubmitLog);
-
-      const injector = await web3FromAddress(selectedAddress);
-      api.setSigner(injector.signer);
-
-      const HYDRADX_PARA = 2034;
-
-      // Use V4 shapes (modern, matches examples)
-      const dest = {
-        V4: {
-          parents: 1,
-          interior: { X1: [{ Parachain: HYDRADX_PARA }] },
-        },
-      };
-
-      const id = decodeAddress(selectedAddress);
-      const beneficiary = {
-        V4: {
-          parents: 0,
-          interior: { X1: [{ AccountId32: { network: null, id } }] },
-        },
-      };
-
-      // DOT relay asset
-      const DOT_DECIMALS = 10;
-      const amountInt = parseDecimalToInt(guardedReq.amount, DOT_DECIMALS);
-      if (amountInt <= 0n) throw new Error("Amount too small.");
-
-      const assets = {
-        V4: [
-          {
-            fun: { Fungible: amountInt.toString() },
-            id: { parents: 1, interior: { Here: null } },
-          },
-        ],
-      };
-
-      const feeAssetItem = 0;
-
-const weightLimit = { Unlimited: null };
-
-const tx = api.tx.polkadotXcm.transferAssets(
-  dest as any,
-  beneficiary as any,
-  assets as any,
-  feeAssetItem,
-  weightLimit as any
-);
-
-      setSubmitLog((s) => s + "Submitting DOT via polkadotXcm.transferAssets\n");
-      setSubmitLog((s) => s + "Signing & submitting...\n");
-
-      let dispatchLogged = false;
-
-      const unsub = await tx.signAndSend(selectedAddress, (result) => {
-        if (result.status.isInBlock) {
-          setSubmitLog((s) => s + `✅ In block: ${result.status.asInBlock.toString()}\n`);
-        } else if (result.status.isFinalized) {
-          setSubmitLog((s) => s + `🎉 Finalized: ${result.status.asFinalized.toString()}\n`);
-          try { unsub(); } catch {}
-          api.disconnect().catch(() => {});
-          setSubmitting(false);
-        } else {
-          setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
-        }
-
-        logAttemptedAndSomeEvents(result, setSubmitLog);
-
-        if (result.dispatchError && !dispatchLogged) {
-          dispatchLogged = true;
-          let errMsg = result.dispatchError.toString();
-          if (result.dispatchError.isModule) {
-            const decoded = api.registry.findMetaError(result.dispatchError.asModule);
-            errMsg = `${decoded.section}.${decoded.name}: ${decoded.docs.join(" ")}`;
-          }
-          setSubmitLog((s) => s + `❌ DispatchError: ${errMsg}\n`);
-        }
-      });
-    } catch (e: any) {
-      setSubmitLog((s) => s + `❌ Error: ${e?.message ?? String(e)}\n`);
-      setSubmitting(false);
-    }
-  }
-
-  async function submitReal() {
-    if (supportsDotTransferAssets) return submitDotTransferAssets();
-    if (supportsUsdcReserve) return submitUsdcReserve();
-    setSubmitLog("❌ Unsupported real submit combination.\n");
   }
 
   return (
@@ -459,13 +283,13 @@ const tx = api.tx.polkadotXcm.transferAssets(
       </header>
 
       <WalletPanel
-        chain={guardedReq.from as ChainKey}
+        chain={req.from as ChainKey}
         onSelectedAddress={setSelectedAddress}
         onChainData={(d) => setWallet((prev) => ({ ...prev, ...d }))}
       />
 
       <SendForm
-        value={guardedReq}
+        value={req}
         onChange={(next) => {
           setReq(next);
           setDryRun(undefined);
@@ -476,26 +300,16 @@ const tx = api.tx.polkadotXcm.transferAssets(
         serviceFeeEnabled={serviceFeeEnabled}
         onToggleServiceFee={setServiceFeeEnabled}
         canPreview={canPreview}
-        onDryRun={handleDryRun}
+        onDryRun={onDryRun}
         dryRun={dryRun}
         canSubmitReal={canSubmitReal}
-        onSubmitReal={submitReal}
+        onSubmitReal={onSubmitReal}
         submitHelp={submitHelp}
-        warning={hydraFeeWarning}
+        warning={undefined}
       />
 
       {submitLog && (
-        <div
-          style={{
-            marginTop: 20,
-            padding: 12,
-            borderRadius: 10,
-            background: "#0b0b0b",
-            color: "#e6e6e6",
-            fontSize: 13,
-            overflowX: "auto",
-          }}
-        >
+        <div style={{ marginTop: 20, padding: 12, borderRadius: 10, background: "#0b0b0b", color: "#e6e6e6", fontSize: 13, overflowX: "auto" }}>
           <strong>Submit log</strong>
           <pre style={{ marginTop: 10, whiteSpace: "pre-wrap" }}>{submitLog}</pre>
         </div>
