@@ -7,7 +7,6 @@ export type ChainKey = "assethub" | "hydradx";
 
 const RPCS: Record<ChainKey, string[]> = {
   assethub: [
-    "wss://asset-hub-polkadot-rpc.dwellir.com",
     "wss://polkadot-asset-hub-rpc.polkadot.io",
     "wss://rpc-asset-hub-polkadot.luckyfriday.io",
   ],
