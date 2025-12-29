@@ -398,12 +398,15 @@ export default function App() {
 
       const feeAssetItem = 0;
 
-      const tx = api.tx.polkadotXcm.transferAssets(
-        dest as any,
-        beneficiary as any,
-        assets as any,
-        feeAssetItem
-      );
+const weightLimit = { Unlimited: null };
+
+const tx = api.tx.polkadotXcm.transferAssets(
+  dest as any,
+  beneficiary as any,
+  assets as any,
+  feeAssetItem,
+  weightLimit as any
+);
 
       setSubmitLog((s) => s + "Submitting DOT via polkadotXcm.transferAssets\n");
       setSubmitLog((s) => s + "Signing & submitting...\n");
