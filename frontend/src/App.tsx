@@ -16,6 +16,8 @@ import { ApiPromise, WsProvider } from "@polkadot/api";
 import { web3FromAddress } from "@polkadot/extension-dapp";
 import { decodeAddress } from "@polkadot/util-crypto";
 
+const MIN_STABLE = 0.10; // per tua richiesta
+
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error("RPC timeout")), ms);
@@ -29,7 +31,6 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   });
 }
 
-// Parse decimal string -> integer BigInt with decimals (no float)
 function parseDecimalToInt(amount: string, decimals: number): bigint {
   const s = (amount ?? "").trim();
   if (!s) return 0n;
@@ -58,12 +59,17 @@ function makeFeeQuoteNoService(networkFeeDotEst: number): FeeQuote {
 
 async function connectApiWithFallback(
   rpcs: string[],
-  setLog: (fn: (s: string) => string) => void
-): Promise<ApiPromise> {
+  setLog: (fn: (s: string) => string) => void,
+  cacheKey: string
+): Promise<{ api: ApiPromise; rpc: string }> {
+  // Try last-known-good first
+  const cached = sessionStorage.getItem(cacheKey);
+  const ordered = cached ? [cached, ...rpcs.filter((x) => x !== cached)] : rpcs;
+
   setLog((s) => s + "Connecting RPC (fallback mode)\n");
   let lastErr: any = null;
 
-  for (const rpc of rpcs) {
+  for (const rpc of ordered) {
     try {
       setLog((s) => s + `→ Trying: ${rpc}\n`);
       const api = await withTimeout(
@@ -71,7 +77,8 @@ async function connectApiWithFallback(
         8000
       );
       setLog((s) => s + `✅ Connected: ${rpc}\n`);
-      return api;
+      sessionStorage.setItem(cacheKey, rpc);
+      return { api, rpc };
     } catch (e: any) {
       lastErr = e;
       setLog((s) => s + `✗ Failed: ${rpc} (${e?.message ?? String(e)})\n`);
@@ -83,13 +90,15 @@ async function connectApiWithFallback(
   );
 }
 
-function logAttemptedAndSomeEvents(
+function logAttemptedAndSomeEventsFinalizedOnly(
   result: any,
   setLog: (fn: (s: string) => string) => void
 ) {
+  // only log when finalized to avoid duplicates
+  if (!result.status?.isFinalized) return;
+
   try {
     const lines: string[] = [];
-
     for (const { event } of result.events) {
       const sec = event.section;
       const met = event.method;
@@ -122,17 +131,9 @@ function logAttemptedAndSomeEvents(
     }
 
     if (lines.length) {
-      setLog(
-        (s) =>
-          s +
-          `\n--- EVENTS (debug) ---\n` +
-          lines.join("\n") +
-          `\n--- END EVENTS ---\n`
-      );
+      setLog((s) => s + `\n--- EVENTS (finalized) ---\n${lines.join("\n")}\n--- END EVENTS ---\n`);
     }
-  } catch {
-    // ignore
-  }
+  } catch {}
 }
 
 export default function App() {
@@ -154,7 +155,6 @@ export default function App() {
   const [submitLog, setSubmitLog] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
 
-  // Guard: enforce from != to
   const guardedReq = useMemo<TransferRequest>(() => {
     if (req.from !== req.to) return req;
     const nextTo: TransferRequest["to"] =
@@ -164,28 +164,24 @@ export default function App() {
 
   const errors = useMemo(() => validateRequest(guardedReq), [guardedReq]);
 
-  // Placeholder network fee estimate in native token (DOT/HDX)
   const networkFeeDotEst = 0.012;
 
   const feeQuote = useMemo(() => {
     if (!serviceFeeEnabled) return makeFeeQuoteNoService(networkFeeDotEst);
-
-    // stablecoin service fee is min-clamped when enabled
     const q = quoteFeesDot(0, networkFeeDotEst, DEFAULT_SERVICE_FEE);
     q.notes = [...q.notes, "Stablecoin transfer: service fee is min-clamped when enabled."];
     return q;
   }, [serviceFeeEnabled]);
 
-  // Safety check based on native token on FROM chain
+  // Guards
+  const amountNum = Number(guardedReq.amount || "0");
+  const minOk = Number.isFinite(amountNum) && amountNum >= MIN_STABLE;
+
   const balNative = Number(wallet.balanceDot ?? "NaN");
   const edNative = Number(wallet.edDot ?? "NaN");
   const feeTotal = Number(feeQuote.totalFeeDot);
 
-  const hasWalletNums =
-    Number.isFinite(balNative) &&
-    Number.isFinite(edNative) &&
-    Number.isFinite(feeTotal);
-
+  const hasWalletNums = Number.isFinite(balNative) && Number.isFinite(edNative) && Number.isFinite(feeTotal);
   const remaining = hasWalletNums ? balNative - feeTotal : NaN;
   const safe = hasWalletNums ? remaining >= edNative : false;
 
@@ -195,40 +191,43 @@ export default function App() {
     ? `OK: remaining native ≈ ${remaining.toFixed(6)} (ED ${edNative}).`
     : `Too much: would leave ≈ ${remaining.toFixed(6)} (below ED ${edNative}).`;
 
-  const canPreview = errors.length === 0 && safe;
+  const canPreview = errors.length === 0 && safe && minOk;
 
-  const hydraFeeWarning =
-    guardedReq.from === "hydradx" && Number(wallet.balanceDot ?? "0") === 0
-      ? "Hydra has 0 HDX. You can receive assets, but you need HDX to send transactions (fees)."
+  const modeLabel =
+    guardedReq.from === "assethub"
+      ? "Asset Hub → HydraDX (reserve transfer)"
+      : "HydraDX → Asset Hub (reserve transfer)";
+
+  const warning =
+    !minOk
+      ? `Minimum amount is ${MIN_STABLE.toFixed(2)} (to avoid fee/weight edge cases).`
+      : guardedReq.from === "hydradx" && balNative < 1
+      ? "Hydra native balance is low. Keep enough HDX for fees."
       : undefined;
 
-  // Supported routes (safe-mode)
   const supportsAhToHydra =
     guardedReq.from === "assethub" &&
     guardedReq.to === "hydradx" &&
     (guardedReq.asset === "USDC_AH" || guardedReq.asset === "USDT_AH") &&
-    selectedAddress.length > 0 &&
-    (guardedReq.amount ?? "").trim().length > 0;
+    selectedAddress.length > 0;
 
   const supportsHydraToAh =
     guardedReq.from === "hydradx" &&
     guardedReq.to === "assethub" &&
     (guardedReq.asset === "USDC_HYDRA" || guardedReq.asset === "USDT_HYDRA") &&
-    selectedAddress.length > 0 &&
-    (guardedReq.amount ?? "").trim().length > 0;
+    selectedAddress.length > 0;
 
   const canSubmitReal = canPreview && (supportsAhToHydra || supportsHydraToAh) && !submitting;
 
   const submitHelp =
     supportsAhToHydra
-      ? "Real submit: Asset Hub → HydraDX (reserve transfer)."
+      ? "Real submit enabled: stablecoin Asset Hub → HydraDX."
       : supportsHydraToAh
-      ? "Real submit: HydraDX → Asset Hub (reserve transfer; wallet-grade)."
-      : "Safe-mode: only stablecoin routes are enabled (Asset Hub ↔ HydraDX).";
+      ? "Real submit enabled: stablecoin HydraDX → Asset Hub."
+      : "Unsupported route/asset (safe-mode).";
 
   const onDryRun = () => setDryRun(buildXcmDryRun(guardedReq, feeQuote));
 
-  // RPC lists (Dwellir last on Asset Hub)
   const ASSET_HUB_RPCS = [
     "wss://polkadot-asset-hub-rpc.polkadot.io",
     "wss://rpc-asset-hub-polkadot.luckyfriday.io",
@@ -237,30 +236,17 @@ export default function App() {
     "wss://asset-hub-polkadot-rpc.dwellir.com/ws",
   ];
 
-  const HYDRA_RPCS = [
-    "wss://rpc.hydradx.cloud",
-    "wss://hydradx-rpc.dwellir.com",
-  ];
+  const HYDRA_RPCS = ["wss://rpc.hydradx.cloud", "wss://hydradx-rpc.dwellir.com"];
 
-  // -----------------------------
-  // Asset Hub -> Hydra (USDC/USDT) via limitedReserveTransferAssets
-  // -----------------------------
-  async function submitAhToHydraStable() {
-    const api = await connectApiWithFallback(ASSET_HUB_RPCS, setSubmitLog);
-
+  async function submitAhToHydra(api: ApiPromise) {
     const injector = await web3FromAddress(selectedAddress);
     api.setSigner(injector.signer);
 
     const HYDRADX_PARA = 2034;
-
-    const dest = {
-      V3: { parents: 1, interior: { X1: { Parachain: HYDRADX_PARA } } },
-    };
+    const dest = { V3: { parents: 1, interior: { X1: { Parachain: HYDRADX_PARA } } } };
 
     const id = decodeAddress(selectedAddress);
-    const beneficiary = {
-      V3: { parents: 0, interior: { X1: { AccountId32: { network: null, id } } } },
-    };
+    const beneficiary = { V3: { parents: 0, interior: { X1: { AccountId32: { network: null, id } } } } };
 
     const assetId = guardedReq.asset === "USDC_AH" ? 1337 : 1984;
 
@@ -271,87 +257,37 @@ export default function App() {
     setSubmitLog((s) => s + `Asset: ${symbol} (id ${assetId}, decimals ${decimals})\n`);
 
     const amountInt = parseDecimalToInt(guardedReq.amount, decimals);
-    if (amountInt <= 0n) throw new Error("Amount too small (after decimals).");
 
     const assets = {
       V3: [
         {
           fun: { Fungible: amountInt.toString() },
-          id: {
-            Concrete: {
-              parents: 0,
-              interior: { X2: [{ PalletInstance: 50 }, { GeneralIndex: String(assetId) }] },
-            },
-          },
+          id: { Concrete: { parents: 0, interior: { X2: [{ PalletInstance: 50 }, { GeneralIndex: String(assetId) }] } } },
         },
       ],
     };
-
-    const feeAssetItem = 0;
-    const weightLimit = { Unlimited: null };
 
     const tx = api.tx.polkadotXcm.limitedReserveTransferAssets(
       dest as any,
       beneficiary as any,
       assets as any,
-      feeAssetItem,
-      weightLimit as any
+      0,
+      { Unlimited: null } as any
     );
 
-    setSubmitLog((s) => s + "Signing & submitting...\n");
-
-    let dispatchLogged = false;
-
-    const unsub = await tx.signAndSend(selectedAddress, (result) => {
-      if (result.status.isInBlock) {
-        setSubmitLog((s) => s + `✅ In block: ${result.status.asInBlock.toString()}\n`);
-      } else if (result.status.isFinalized) {
-        setSubmitLog((s) => s + `🎉 Finalized: ${result.status.asFinalized.toString()}\n`);
-        try { unsub(); } catch {}
-        api.disconnect().catch(() => {});
-        setSubmitting(false);
-      } else {
-        setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
-      }
-
-      logAttemptedAndSomeEvents(result, setSubmitLog);
-
-      if (result.dispatchError && !dispatchLogged) {
-        dispatchLogged = true;
-        let errMsg = result.dispatchError.toString();
-        if (result.dispatchError.isModule) {
-          const decoded = api.registry.findMetaError(result.dispatchError.asModule);
-          errMsg = `${decoded.section}.${decoded.name}: ${decoded.docs.join(" ")}`;
-        }
-        setSubmitLog((s) => s + `❌ DispatchError: ${errMsg}\n`);
-      }
-    });
+    return tx;
   }
 
-  // -----------------------------
-  // Hydra -> Asset Hub (USDC/USDT) via limitedReserveTransferAssets (correct reserve location)
-  // Reserve location from Hydra POV:
-  // parents: 1
-  // X3: [Parachain 1000, PalletInstance 50, GeneralIndex 1337/1984]
-  // -----------------------------
-  async function submitHydraToAhReserveStable() {
-    const api = await connectApiWithFallback(HYDRA_RPCS, setSubmitLog);
-
+  async function submitHydraToAh(api: ApiPromise) {
     const injector = await web3FromAddress(selectedAddress);
     api.setSigner(injector.signer);
 
     const ASSET_HUB_PARA = 1000;
-
-    const dest = {
-      V3: { parents: 1, interior: { X1: { Parachain: ASSET_HUB_PARA } } },
-    };
+    const dest = { V3: { parents: 1, interior: { X1: { Parachain: ASSET_HUB_PARA } } } };
 
     const id = decodeAddress(selectedAddress);
-    const beneficiary = {
-      V3: { parents: 0, interior: { X1: { AccountId32: { network: null, id } } } },
-    };
+    const beneficiary = { V3: { parents: 0, interior: { X1: { AccountId32: { network: null, id } } } } };
 
-    // Map to Asset Hub GeneralIndex and Hydra registry for decimals
     const generalIndex = guardedReq.asset === "USDC_HYDRA" ? "1337" : "1984";
     const hydraAssetId = guardedReq.asset === "USDC_HYDRA" ? 22 : 10;
 
@@ -361,12 +297,10 @@ export default function App() {
     const symbol: string = String(human?.symbol ?? "USDT");
 
     setSubmitLog((s) => s + `Asset (Hydra): ${symbol} (assetId ${hydraAssetId}, decimals ${decimals})\n`);
-    setSubmitLog((s) => s + `Route: Hydra -> Asset Hub reserve transfer, GeneralIndex ${generalIndex}\n`);
+    setSubmitLog((s) => s + `Reserve location: parents=1, X3[Parachain 1000, PalletInstance 50, GeneralIndex ${generalIndex}]\n`);
 
     const amountInt = parseDecimalToInt(guardedReq.amount, decimals);
-    if (amountInt <= 0n) throw new Error("Amount too small (after decimals).");
 
-    // Reserve location (Hydra POV) as tuple array X3
     const assets = {
       V3: [
         {
@@ -387,45 +321,15 @@ export default function App() {
       ],
     };
 
-    const feeAssetItem = 0;
-    const weightLimit = { Unlimited: null };
-
     const tx = api.tx.polkadotXcm.limitedReserveTransferAssets(
       dest as any,
       beneficiary as any,
       assets as any,
-      feeAssetItem,
-      weightLimit as any
+      0,
+      { Unlimited: null } as any
     );
 
-    setSubmitLog((s) => s + "Signing & submitting...\n");
-
-    let dispatchLogged = false;
-
-    const unsub = await tx.signAndSend(selectedAddress, (result) => {
-      if (result.status.isInBlock) {
-        setSubmitLog((s) => s + `✅ In block: ${result.status.asInBlock.toString()}\n`);
-      } else if (result.status.isFinalized) {
-        setSubmitLog((s) => s + `🎉 Finalized: ${result.status.asFinalized.toString()}\n`);
-        try { unsub(); } catch {}
-        api.disconnect().catch(() => {});
-        setSubmitting(false);
-      } else {
-        setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
-      }
-
-      logAttemptedAndSomeEvents(result, setSubmitLog);
-
-      if (result.dispatchError && !dispatchLogged) {
-        dispatchLogged = true;
-        let errMsg = result.dispatchError.toString();
-        if (result.dispatchError.isModule) {
-          const decoded = api.registry.findMetaError(result.dispatchError.asModule);
-          errMsg = `${decoded.section}.${decoded.name}: ${decoded.docs.join(" ")}`;
-        }
-        setSubmitLog((s) => s + `❌ DispatchError: ${errMsg}\n`);
-      }
-    });
+    return tx;
   }
 
   async function onSubmitReal() {
@@ -435,14 +339,72 @@ export default function App() {
     try {
       if (!canPreview) throw new Error("Form is not safe/valid yet.");
 
+      // choose chain
       if (supportsAhToHydra) {
-        return await submitAhToHydraStable();
-      }
-      if (supportsHydraToAh) {
-        return await submitHydraToAhReserveStable();
+        const { api } = await connectApiWithFallback(ASSET_HUB_RPCS, setSubmitLog, "rpc_assethub_last_ok");
+        const tx = await submitAhToHydra(api);
+
+        setSubmitLog((s) => s + "Signing & submitting...\n");
+
+        let dispatchLogged = false;
+        const unsub = await tx.signAndSend(selectedAddress, (result) => {
+          if (result.status.isFinalized) {
+            setSubmitLog((s) => s + `🎉 Finalized: ${result.status.asFinalized.toString()}\n`);
+            logAttemptedAndSomeEventsFinalizedOnly(result, setSubmitLog);
+            try { unsub(); } catch {}
+            api.disconnect().catch(() => {});
+            setSubmitting(false);
+          } else {
+            setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
+          }
+
+          if (result.dispatchError && !dispatchLogged) {
+            dispatchLogged = true;
+            let errMsg = result.dispatchError.toString();
+            if (result.dispatchError.isModule) {
+              const decoded = api.registry.findMetaError(result.dispatchError.asModule);
+              errMsg = `${decoded.section}.${decoded.name}: ${decoded.docs.join(" ")}`;
+            }
+            setSubmitLog((s) => s + `❌ DispatchError: ${errMsg}\n`);
+          }
+        });
+
+        return;
       }
 
-      throw new Error("Unsupported route/asset for real submit (safe-mode).");
+      if (supportsHydraToAh) {
+        const { api } = await connectApiWithFallback(HYDRA_RPCS, setSubmitLog, "rpc_hydra_last_ok");
+        const tx = await submitHydraToAh(api);
+
+        setSubmitLog((s) => s + "Signing & submitting...\n");
+
+        let dispatchLogged = false;
+        const unsub = await tx.signAndSend(selectedAddress, (result) => {
+          if (result.status.isFinalized) {
+            setSubmitLog((s) => s + `🎉 Finalized: ${result.status.asFinalized.toString()}\n`);
+            logAttemptedAndSomeEventsFinalizedOnly(result, setSubmitLog);
+            try { unsub(); } catch {}
+            api.disconnect().catch(() => {});
+            setSubmitting(false);
+          } else {
+            setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
+          }
+
+          if (result.dispatchError && !dispatchLogged) {
+            dispatchLogged = true;
+            let errMsg = result.dispatchError.toString();
+            if (result.dispatchError.isModule) {
+              const decoded = api.registry.findMetaError(result.dispatchError.asModule);
+              errMsg = `${decoded.section}.${decoded.name}: ${decoded.docs.join(" ")}`;
+            }
+            setSubmitLog((s) => s + `❌ DispatchError: ${errMsg}\n`);
+          }
+        });
+
+        return;
+      }
+
+      throw new Error("Unsupported route/asset (safe-mode).");
     } catch (e: any) {
       setSubmitLog((s) => s + `❌ Error: ${e?.message ?? String(e)}\n`);
       setSubmitting(false);
@@ -481,21 +443,12 @@ export default function App() {
         canSubmitReal={canSubmitReal}
         onSubmitReal={onSubmitReal}
         submitHelp={submitHelp}
-        warning={hydraFeeWarning}
+        warning={warning}
+        modeLabel={modeLabel}
       />
 
       {submitLog && (
-        <div
-          style={{
-            marginTop: 20,
-            padding: 12,
-            borderRadius: 10,
-            background: "#0b0b0b",
-            color: "#e6e6e6",
-            fontSize: 13,
-            overflowX: "auto",
-          }}
-        >
+        <div style={{ marginTop: 20, padding: 12, borderRadius: 10, background: "#0b0b0b", color: "#e6e6e6", fontSize: 13, overflowX: "auto" }}>
           <strong>Submit log</strong>
           <pre style={{ marginTop: 10, whiteSpace: "pre-wrap" }}>{submitLog}</pre>
         </div>

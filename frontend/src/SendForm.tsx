@@ -26,6 +26,7 @@ export function SendForm(props: {
   submitHelp: string;
 
   warning?: string;
+  modeLabel: string;
 }) {
   const {
     value,
@@ -41,13 +42,11 @@ export function SendForm(props: {
     onSubmitReal,
     submitHelp,
     warning,
+    modeLabel,
   } = props;
 
   const errors = validateRequest(value);
 
-  // Safe-mode routing:
-  // - Asset Hub -> Hydra: allow USDC_AH + USDT_AH
-  // - Hydra -> Asset Hub: show as "coming soon", allow selecting Hydra assets
   const toOptions =
     value.from === "assethub"
       ? [{ key: "hydradx", name: "HydraDX" }]
@@ -76,6 +75,21 @@ export function SendForm(props: {
     >
       <h2 style={{ marginTop: 0 }}>Send</h2>
 
+      {/* Mode banner */}
+      <div
+        style={{
+          marginTop: 10,
+          border: "1px solid #eaeaea",
+          background: "#fafafa",
+          padding: 10,
+          borderRadius: 10,
+          fontSize: 13,
+        }}
+      >
+        <b>Mode:</b> {modeLabel}
+      </div>
+
+      {/* Optional warning */}
       {warning && (
         <div
           style={{
@@ -100,11 +114,8 @@ export function SendForm(props: {
               const nextFrom = e.target.value as TransferRequest["from"];
               const nextTo: TransferRequest["to"] =
                 nextFrom === "assethub" ? "hydradx" : "assethub";
-
-              // default asset per chain
               const nextAsset: TransferRequest["asset"] =
                 nextFrom === "assethub" ? "USDC_AH" : "USDC_HYDRA";
-
               onChange({ ...value, from: nextFrom, to: nextTo, asset: nextAsset });
             }}
             style={{ width: "100%", padding: 10, borderRadius: 8 }}
@@ -136,9 +147,7 @@ export function SendForm(props: {
           <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>Asset</div>
           <select
             value={value.asset}
-            onChange={(e) =>
-              onChange({ ...value, asset: e.target.value as any })
-            }
+            onChange={(e) => onChange({ ...value, asset: e.target.value as any })}
             style={{ width: "100%", padding: 10, borderRadius: 8 }}
           >
             {assetOptions.map((a) => (
@@ -154,7 +163,7 @@ export function SendForm(props: {
           <input
             value={value.amount}
             onChange={(e) => onChange({ ...value, amount: e.target.value })}
-            placeholder="e.g. 1.25"
+            placeholder="e.g. 1.00"
             inputMode="decimal"
             style={{
               width: "100%",
@@ -166,6 +175,7 @@ export function SendForm(props: {
         </label>
       </div>
 
+      {/* ERRORS */}
       {errors.length > 0 && (
         <div
           style={{
@@ -185,6 +195,7 @@ export function SendForm(props: {
         </div>
       )}
 
+      {/* FEES */}
       <div
         style={{
           marginTop: 14,
@@ -197,10 +208,10 @@ export function SendForm(props: {
         <strong>Fees (estimate)</strong>
 
         <div style={{ marginTop: 8, display: "grid", gap: 4 }}>
-          <div>Network fee (est): {feeQuote.networkFeeDotEst} DOT</div>
-          <div>Service fee: {feeQuote.serviceFeeDot} DOT</div>
+          <div>Network fee (est): {feeQuote.networkFeeDotEst}</div>
+          <div>Service fee: {feeQuote.serviceFeeDot}</div>
           <div>
-            <b>Total fee: {feeQuote.totalFeeDot} DOT</b>
+            <b>Total fee: {feeQuote.totalFeeDot}</b>
           </div>
         </div>
 
@@ -212,6 +223,7 @@ export function SendForm(props: {
           </ul>
         )}
 
+        {/* Service fee checkbox */}
         <div style={{ marginTop: 12 }}>
           <label style={{ display: "flex", gap: 10, alignItems: "center" }}>
             <input
@@ -221,10 +233,16 @@ export function SendForm(props: {
             />
             <span>Include service fee (default on)</span>
           </label>
+
           <div style={{ marginTop: 6, fontSize: 13, opacity: 0.7 }}>
             Service fees help fund development and maintenance of this non-custodial dApp.
             You can disable them if you prefer.
           </div>
+
+          <div style={{ marginTop: 6, fontSize: 13, opacity: 0.7 }}>
+            <b>Note:</b> service fee is currently <b>informational</b> (not yet collected on-chain).
+          </div>
+
           {!serviceFeeEnabled && (
             <div style={{ marginTop: 6, fontSize: 13, opacity: 0.75 }}>
               Service fee disabled. Consider enabling it to support the project.
@@ -235,6 +253,7 @@ export function SendForm(props: {
         <div style={{ marginTop: 12, fontSize: 13, opacity: 0.7 }}>{safetyMsg}</div>
       </div>
 
+      {/* Preview */}
       <button
         disabled={!canPreview}
         style={{
@@ -251,6 +270,7 @@ export function SendForm(props: {
         {canPreview ? "Preview XCM (dry-run)" : "Fix fields / wallet safety to continue"}
       </button>
 
+      {/* Submit */}
       <button
         disabled={!canSubmitReal}
         style={{
