@@ -14,7 +14,7 @@ import type { XcmDryRun } from "../../xcm-engine/dryRun";
 
 import { ApiPromise, WsProvider } from "@polkadot/api";
 import { web3FromAddress } from "@polkadot/extension-dapp";
-import { decodeAddress, blake2AsHex } from "@polkadot/util-crypto";
+import { decodeAddress } from "@polkadot/util-crypto";
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -29,7 +29,7 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   });
 }
 
-// Parse decimal string to integer (BigInt) with given decimals, NO float.
+// Parse decimal string -> integer BigInt with decimals (no float)
 function parseDecimalToInt(amount: string, decimals: number): bigint {
   const s = (amount ?? "").trim();
   if (!s) return 0n;
@@ -164,11 +164,13 @@ export default function App() {
 
   const errors = useMemo(() => validateRequest(guardedReq), [guardedReq]);
 
-  // placeholder fee estimate in native token
+  // Placeholder network fee estimate in native token (DOT/HDX)
   const networkFeeDotEst = 0.012;
 
   const feeQuote = useMemo(() => {
     if (!serviceFeeEnabled) return makeFeeQuoteNoService(networkFeeDotEst);
+
+    // stablecoin service fee is min-clamped when enabled
     const q = quoteFeesDot(0, networkFeeDotEst, DEFAULT_SERVICE_FEE);
     q.notes = [...q.notes, "Stablecoin transfer: service fee is min-clamped when enabled."];
     return q;
@@ -200,7 +202,7 @@ export default function App() {
       ? "Hydra has 0 HDX. You can receive assets, but you need HDX to send transactions (fees)."
       : undefined;
 
-  // Support matrix
+  // Supported routes (safe-mode)
   const supportsAhToHydra =
     guardedReq.from === "assethub" &&
     guardedReq.to === "hydradx" &&
@@ -221,7 +223,7 @@ export default function App() {
     supportsAhToHydra
       ? "Real submit: Asset Hub → HydraDX (reserve transfer)."
       : supportsHydraToAh
-      ? "Real submit: HydraDX → Asset Hub (Nova-compat XCM send V4)."
+      ? "Real submit: HydraDX → Asset Hub (reserve transfer; wallet-grade)."
       : "Safe-mode: only stablecoin routes are enabled (Asset Hub ↔ HydraDX).";
 
   const onDryRun = () => setDryRun(buildXcmDryRun(guardedReq, feeQuote));
@@ -241,7 +243,7 @@ export default function App() {
   ];
 
   // -----------------------------
-  // Asset Hub -> Hydra (USDC/USDT) reserve transfer
+  // Asset Hub -> Hydra (USDC/USDT) via limitedReserveTransferAssets
   // -----------------------------
   async function submitAhToHydraStable() {
     const api = await connectApiWithFallback(ASSET_HUB_RPCS, setSubmitLog);
@@ -327,10 +329,12 @@ export default function App() {
   }
 
   // -----------------------------
-  // Hydra -> Asset Hub (USDC/USDT) via polkadotXcm.send (Nova-compat)
-  // fee == amount, topic non-zero, weight_limit snake_case like Nova dump
+  // Hydra -> Asset Hub (USDC/USDT) via limitedReserveTransferAssets (correct reserve location)
+  // Reserve location from Hydra POV:
+  // parents: 1
+  // X3: [Parachain 1000, PalletInstance 50, GeneralIndex 1337/1984]
   // -----------------------------
-  async function submitHydraToAhSendV4_NovaCompat() {
+  async function submitHydraToAhReserveStable() {
     const api = await connectApiWithFallback(HYDRA_RPCS, setSubmitLog);
 
     const injector = await web3FromAddress(selectedAddress);
@@ -342,6 +346,12 @@ export default function App() {
       V3: { parents: 1, interior: { X1: { Parachain: ASSET_HUB_PARA } } },
     };
 
+    const id = decodeAddress(selectedAddress);
+    const beneficiary = {
+      V3: { parents: 0, interior: { X1: { AccountId32: { network: null, id } } } },
+    };
+
+    // Map to Asset Hub GeneralIndex and Hydra registry for decimals
     const generalIndex = guardedReq.asset === "USDC_HYDRA" ? "1337" : "1984";
     const hydraAssetId = guardedReq.asset === "USDC_HYDRA" ? 22 : 10;
 
@@ -351,70 +361,44 @@ export default function App() {
     const symbol: string = String(human?.symbol ?? "USDT");
 
     setSubmitLog((s) => s + `Asset (Hydra): ${symbol} (assetId ${hydraAssetId}, decimals ${decimals})\n`);
-    setSubmitLog((s) => s + `Route: Hydra -> Asset Hub, GeneralIndex ${generalIndex}\n`);
+    setSubmitLog((s) => s + `Route: Hydra -> Asset Hub reserve transfer, GeneralIndex ${generalIndex}\n`);
 
     const amountInt = parseDecimalToInt(guardedReq.amount, decimals);
     if (amountInt <= 0n) throw new Error("Amount too small (after decimals).");
 
-    const idBytes = decodeAddress(selectedAddress);
-
-    // Non-zero topic (H256)
-    const topic = blake2AsHex(
-      `${selectedAddress}|${Date.now()}|${Math.random()}|${generalIndex}|${amountInt.toString()}`,
-      256
-    );
-
-    // Nova-compat: fee == amount
-    const message = {
-      V4: [
+    // Reserve location (Hydra POV) as tuple array X3
+    const assets = {
+      V3: [
         {
-          WithdrawAsset: [
-            {
-              id: {
-                parents: 0,
-                interior: {
-                  X2: [{ PalletInstance: 50 }, { GeneralIndex: generalIndex }],
-                },
-              },
-              fun: { Fungible: amountInt.toString() },
-            },
-          ],
-        },
-        { ClearOrigin: "NULL" }, // keep Nova style
-        {
-          BuyExecution: {
-            fees: {
-              id: {
-                parents: 0,
-                interior: {
-                  X2: [{ PalletInstance: 50 }, { GeneralIndex: generalIndex }],
-                },
-              },
-              fun: { Fungible: amountInt.toString() },
-            },
-            // snake_case like Nova dump
-            weight_limit: { Unlimited: "NULL" },
-          },
-        },
-        {
-          DepositAsset: {
-            assets: { Wild: { AllCounted: 1 } },
-            beneficiary: {
-              parents: 0,
+          fun: { Fungible: amountInt.toString() },
+          id: {
+            Concrete: {
+              parents: 1,
               interior: {
-                X1: [{ AccountId32: { network: null, id: idBytes } }],
+                X3: [
+                  { Parachain: ASSET_HUB_PARA },
+                  { PalletInstance: 50 },
+                  { GeneralIndex: generalIndex },
+                ],
               },
             },
           },
         },
-        { SetTopic: topic },
       ],
     };
 
-    setSubmitLog((s) => s + `Mode: Nova-compat (fee == amount)\n`);
-    setSubmitLog((s) => s + "Signing & submitting...\n");
+    const feeAssetItem = 0;
+    const weightLimit = { Unlimited: null };
 
-    const tx = api.tx.polkadotXcm.send(dest as any, message as any);
+    const tx = api.tx.polkadotXcm.limitedReserveTransferAssets(
+      dest as any,
+      beneficiary as any,
+      assets as any,
+      feeAssetItem,
+      weightLimit as any
+    );
+
+    setSubmitLog((s) => s + "Signing & submitting...\n");
 
     let dispatchLogged = false;
 
@@ -455,7 +439,7 @@ export default function App() {
         return await submitAhToHydraStable();
       }
       if (supportsHydraToAh) {
-        return await submitHydraToAhSendV4_NovaCompat();
+        return await submitHydraToAhReserveStable();
       }
 
       throw new Error("Unsupported route/asset for real submit (safe-mode).");
