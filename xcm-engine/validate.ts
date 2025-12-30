@@ -9,13 +9,12 @@ export function validateRequest(req: TransferRequest): string[] {
     errs.push("Amount must be greater than zero.");
   }
 
-  // Phase 0/1 strict scope
-  const allowedAssets = new Set(["DOT", "USDC_AH", "USDC_HYDRA"]);
-  if (!allowedAssets.has(req.asset)) errs.push("Unsupported asset (Phase 0/1).");
+  const allowedAssets = new Set(["USDC_AH", "USDT_AH", "USDC_HYDRA", "USDT_HYDRA"]);
+  if (!allowedAssets.has(req.asset)) errs.push("Unsupported asset.");
 
   const allowedChains = new Set(["assethub", "hydradx"]);
   if (!allowedChains.has(req.from) || !allowedChains.has(req.to)) {
-    errs.push("Unsupported chain (Phase 0/1).");
+    errs.push("Unsupported chain.");
   }
 
   return errs;

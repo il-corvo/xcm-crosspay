@@ -45,11 +45,9 @@ export function SendForm(props: {
 
   const errors = validateRequest(value);
 
-  // Route-aware UI (clean & safe):
-  // - If from=assethub -> only to=hydradx, asset=USDC_AH
-  // - If from=hydradx -> only to=assethub, asset=USDC_HYDRA (coming soon, real submit disabled)
-  const fromOptions = CHAINS;
-
+  // Safe-mode routing:
+  // - Asset Hub -> Hydra: allow USDC_AH + USDT_AH
+  // - Hydra -> Asset Hub: show as "coming soon", allow selecting Hydra assets
   const toOptions =
     value.from === "assethub"
       ? [{ key: "hydradx", name: "HydraDX" }]
@@ -57,8 +55,14 @@ export function SendForm(props: {
 
   const assetOptions =
     value.from === "assethub"
-      ? [{ key: "USDC_AH", label: "USDC (Asset Hub)" }]
-      : [{ key: "USDC_HYDRA", label: "USDC (Hydra)" }];
+      ? [
+          { key: "USDC_AH", label: "USDC (Asset Hub)" },
+          { key: "USDT_AH", label: "USDT (Asset Hub)" },
+        ]
+      : [
+          { key: "USDC_HYDRA", label: "USDC (Hydra)" },
+          { key: "USDT_HYDRA", label: "USDT (Hydra)" },
+        ];
 
   return (
     <div
@@ -88,7 +92,6 @@ export function SendForm(props: {
       )}
 
       <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
-        {/* FROM */}
         <label>
           <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>From</div>
           <select
@@ -97,13 +100,16 @@ export function SendForm(props: {
               const nextFrom = e.target.value as TransferRequest["from"];
               const nextTo: TransferRequest["to"] =
                 nextFrom === "assethub" ? "hydradx" : "assethub";
+
+              // default asset per chain
               const nextAsset: TransferRequest["asset"] =
                 nextFrom === "assethub" ? "USDC_AH" : "USDC_HYDRA";
+
               onChange({ ...value, from: nextFrom, to: nextTo, asset: nextAsset });
             }}
             style={{ width: "100%", padding: 10, borderRadius: 8 }}
           >
-            {fromOptions.map((c) => (
+            {CHAINS.map((c) => (
               <option key={c.key} value={c.key}>
                 {c.name}
               </option>
@@ -111,14 +117,11 @@ export function SendForm(props: {
           </select>
         </label>
 
-        {/* TO */}
         <label>
           <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>To</div>
           <select
             value={value.to}
-            onChange={(e) =>
-              onChange({ ...value, to: e.target.value as TransferRequest["to"] })
-            }
+            onChange={(e) => onChange({ ...value, to: e.target.value as any })}
             style={{ width: "100%", padding: 10, borderRadius: 8 }}
           >
             {toOptions.map((c) => (
@@ -129,13 +132,12 @@ export function SendForm(props: {
           </select>
         </label>
 
-        {/* ASSET */}
         <label>
           <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>Asset</div>
           <select
             value={value.asset}
             onChange={(e) =>
-              onChange({ ...value, asset: e.target.value as TransferRequest["asset"] })
+              onChange({ ...value, asset: e.target.value as any })
             }
             style={{ width: "100%", padding: 10, borderRadius: 8 }}
           >
@@ -147,7 +149,6 @@ export function SendForm(props: {
           </select>
         </label>
 
-        {/* AMOUNT */}
         <label>
           <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>Amount</div>
           <input

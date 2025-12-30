@@ -29,21 +29,26 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   });
 }
 
+// Parse decimal string to integer (BigInt) with given decimals, NO float.
+// Examples: ("1.23", 6) => 1230000n
 function parseDecimalToInt(amount: string, decimals: number): bigint {
   const s = (amount ?? "").trim();
   if (!s) return 0n;
+
+  // allow "1", "1.", ".5", "0.5"
   const m = s.match(/^(\d*)\.?(\d*)$/);
   if (!m) return 0n;
 
   const wholeStr = m[1] || "0";
-  const fracRaw = m[2] || "";
-  const frac = fracRaw.slice(0, decimals).padEnd(decimals, "0");
+  const fracStrRaw = m[2] || "";
+
+  const fracStr = fracStrRaw.slice(0, decimals).padEnd(decimals, "0");
 
   const whole = BigInt(wholeStr || "0");
-  const fracInt = BigInt(frac || "0");
-  const base = 10n ** BigInt(decimals);
+  const frac = BigInt(fracStr || "0");
 
-  return whole * base + fracInt;
+  const base = 10n ** BigInt(decimals);
+  return whole * base + frac;
 }
 
 function makeFeeQuoteNoService(networkFeeDotEst: number): FeeQuote {
@@ -88,13 +93,18 @@ function logAttemptedAndSomeEvents(
 ) {
   try {
     const lines: string[] = [];
+
     for (const { event } of result.events) {
       const sec = event.section;
       const met = event.method;
 
       if (sec === "polkadotXcm" && met === "Attempted") {
         let payload = "";
-        try { payload = JSON.stringify(event.toHuman(), null, 2); } catch { payload = event.toString(); }
+        try {
+          payload = JSON.stringify(event.toHuman(), null, 2);
+        } catch {
+          payload = event.toString();
+        }
         lines.push(`*** polkadotXcm.Attempted ***\n${payload}`);
       } else if (
         sec === "polkadotXcm" ||
@@ -105,20 +115,33 @@ function logAttemptedAndSomeEvents(
         sec === "system"
       ) {
         let payload = "";
-        try { payload = JSON.stringify(event.toHuman()); } catch { payload = event.toString(); }
+        try {
+          payload = JSON.stringify(event.toHuman());
+        } catch {
+          payload = event.toString();
+        }
         lines.push(`${sec}.${met}: ${payload}`);
       }
     }
 
     if (lines.length) {
-      setLog((s) => s + `\n--- EVENTS (debug) ---\n${lines.join("\n")}\n--- END EVENTS ---\n`);
+      setLog(
+        (s) =>
+          s +
+          `\n--- EVENTS (debug) ---\n` +
+          lines.join("\n") +
+          `\n--- END EVENTS ---\n`
+      );
     }
-  } catch {}
+  } catch {
+    // ignore
+  }
 }
 
 export default function App() {
   const buildSha = import.meta.env.VITE_BUILD_SHA ?? "dev";
 
+  // Safe-mode defaults
   const [req, setReq] = useState<TransferRequest>({
     from: "assethub",
     to: "hydradx",
@@ -128,73 +151,101 @@ export default function App() {
 
   const [serviceFeeEnabled, setServiceFeeEnabled] = useState(true);
 
-  const [wallet, setWallet] = useState<WalletChainData>({ status: "Not connected" });
+  const [wallet, setWallet] = useState<WalletChainData>({
+    status: "Not connected",
+  });
   const [selectedAddress, setSelectedAddress] = useState<string>("");
 
   const [dryRun, setDryRun] = useState<XcmDryRun | undefined>(undefined);
   const [submitLog, setSubmitLog] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
 
-  const errors = useMemo(() => validateRequest(req), [req]);
+  // Guard: enforce from != to (typing-safe)
+  const guardedReq = useMemo<TransferRequest>(() => {
+    if (req.from !== req.to) return req;
+    const nextTo: TransferRequest["to"] =
+      req.from === "assethub" ? "hydradx" : "assethub";
+    return { ...req, to: nextTo };
+  }, [req]);
 
+  const errors = useMemo(() => validateRequest(guardedReq), [guardedReq]);
+
+  // Phase 1 placeholder: fixed network fee estimate (DOT or native token)
   const networkFeeDotEst = 0.012;
 
-
+  // Fee quote: service fee opt-out (UI only)
   const feeQuote = useMemo(() => {
     if (!serviceFeeEnabled) return makeFeeQuoteNoService(networkFeeDotEst);
-    // For USDC we keep service fee min-clamped (when enabled)
+
+    // For stablecoins we keep service fee min-clamped when enabled
     const q = quoteFeesDot(0, networkFeeDotEst, DEFAULT_SERVICE_FEE);
-    q.notes = [...q.notes, "USDC transfer: service fee is min-clamped when enabled."];
+    q.notes = [...q.notes, "Stablecoin transfer: service fee is min-clamped when enabled."];
     return q;
   }, [serviceFeeEnabled]);
 
-  const balNative = Number(wallet.balanceDot ?? "NaN"); // DOT on Asset Hub
+  // Safety check based on native token on FROM chain (Asset Hub: DOT, Hydra: HDX)
+  const balNative = Number(wallet.balanceDot ?? "NaN");
   const edNative = Number(wallet.edDot ?? "NaN");
   const feeTotal = Number(feeQuote.totalFeeDot);
 
-  const hasWalletNums = Number.isFinite(balNative) && Number.isFinite(edNative) && Number.isFinite(feeTotal);
+  const hasWalletNums =
+    Number.isFinite(balNative) &&
+    Number.isFinite(edNative) &&
+    Number.isFinite(feeTotal);
+
   const remaining = hasWalletNums ? balNative - feeTotal : NaN;
   const safe = hasWalletNums ? remaining >= edNative : false;
 
   const safetyMsg = !hasWalletNums
     ? "Wallet data not ready yet."
     : safe
-    ? `OK: remaining DOT ≈ ${remaining.toFixed(6)} (ED ${edNative}).`
+    ? `OK: remaining native ≈ ${remaining.toFixed(6)} (ED ${edNative}).`
     : `Too much: would leave ≈ ${remaining.toFixed(6)} (below ED ${edNative}).`;
 
   const canPreview = errors.length === 0 && safe;
 
-  const supportsRealSubmit =
-    req.from === "assethub" &&
-    req.to === "hydradx" &&
-    req.asset === "USDC_AH" &&
+  // UX warning when user is on Hydra (needs HDX to send from Hydra in future)
+  const hydraFeeWarning =
+    guardedReq.from === "hydradx" && Number(wallet.balanceDot ?? "0") === 0
+      ? "Hydra has 0 HDX. You can receive assets, but you need HDX to send transactions (fees)."
+      : undefined;
+
+  // Real submit scope (safe-mode): only Asset Hub -> Hydra for USDC/USDT
+  const supportsStablecoinReserve =
+    guardedReq.from === "assethub" &&
+    guardedReq.to === "hydradx" &&
+    (guardedReq.asset === "USDC_AH" || guardedReq.asset === "USDT_AH") &&
     selectedAddress.length > 0 &&
-    (req.amount ?? "").trim().length > 0;
+    (guardedReq.amount ?? "").trim().length > 0;
 
-  const canSubmitReal = canPreview && supportsRealSubmit && !submitting;
+  const canSubmitReal = canPreview && supportsStablecoinReserve && !submitting;
 
-  const submitHelp =
-    supportsRealSubmit
-      ? "Real submit enabled: USDC (Asset Hub) → HydraDX."
-      : "Real submit currently supports only: USDC (Asset Hub) → HydraDX.";
+  const submitHelp = supportsStablecoinReserve
+    ? "Real submit enabled: stablecoin reserve transfer Asset Hub → HydraDX."
+    : "Real submit currently supports only: USDC/USDT (Asset Hub) → HydraDX.";
 
+  const onDryRun = () => setDryRun(buildXcmDryRun(guardedReq, feeQuote));
+
+  // Asset Hub RPC list: Dwellir last
   const ASSET_HUB_RPCS = [
     "wss://polkadot-asset-hub-rpc.polkadot.io",
     "wss://rpc-asset-hub-polkadot.luckyfriday.io",
     "wss://polkadot-asset-hub-rpc.polkadot.io/ws",
-    "wss://asset-hub-polkadot-rpc.dwellir.com", // last
+    "wss://asset-hub-polkadot-rpc.dwellir.com",
     "wss://asset-hub-polkadot-rpc.dwellir.com/ws",
   ];
-
-  const onDryRun = () => setDryRun(buildXcmDryRun(req, feeQuote));
 
   async function onSubmitReal() {
     setSubmitLog("");
     setSubmitting(true);
 
     try {
-      if (!supportsRealSubmit) throw new Error("Unsupported route/asset for real submit (Phase safe-mode).");
-      if (!canPreview) throw new Error("Form is not safe/valid yet.");
+      if (!supportsStablecoinReserve) {
+        throw new Error("Unsupported route/asset for real submit (safe-mode).");
+      }
+      if (!canPreview) {
+        throw new Error("Form is not safe/valid yet.");
+      }
 
       const api = await connectApiWithFallback(ASSET_HUB_RPCS, setSubmitLog);
 
@@ -203,21 +254,33 @@ export default function App() {
 
       const HYDRADX_PARA = 2034;
 
-      const dest = { V3: { parents: 1, interior: { X1: { Parachain: HYDRADX_PARA } } } };
+      const dest = {
+        V3: { parents: 1, interior: { X1: { Parachain: HYDRADX_PARA } } },
+      };
 
       const id = decodeAddress(selectedAddress);
-      const beneficiary = { V3: { parents: 0, interior: { X1: { AccountId32: { network: null, id } } } } };
+      const beneficiary = {
+        V3: {
+          parents: 0,
+          interior: { X1: { AccountId32: { network: null, id } } },
+        },
+      };
 
-      const USDC_ID_AH = 1337;
-      const md: any = await api.query.assets.metadata(USDC_ID_AH);
+      // AssetHub IDs
+      const assetId =
+        guardedReq.asset === "USDC_AH" ? 1337 : 1984;
+
+      // Read metadata (decimals/symbol)
+      const md: any = await api.query.assets.metadata(assetId);
       const decimals: number = Number(md.decimals?.toString?.() ?? "6");
-      const symbol: string = String(md.symbol?.toHuman?.() ?? "USDC");
+      const symbol: string = String(md.symbol?.toHuman?.() ?? "ASSET");
 
-      setSubmitLog((s) => s + `Asset: ${symbol} (id ${USDC_ID_AH}, decimals ${decimals})\n`);
+      setSubmitLog((s) => s + `Asset: ${symbol} (id ${assetId}, decimals ${decimals})\n`);
 
-      const amountInt = parseDecimalToInt(req.amount, decimals);
+      const amountInt = parseDecimalToInt(guardedReq.amount, decimals);
       if (amountInt <= 0n) throw new Error("Amount too small (after decimals).");
 
+      // V3 X2 must be tuple array, not {col0,col1}
       const assets = {
         V3: [
           {
@@ -225,7 +288,9 @@ export default function App() {
             id: {
               Concrete: {
                 parents: 0,
-                interior: { X2: [{ PalletInstance: 50 }, { GeneralIndex: String(USDC_ID_AH) }] },
+                interior: {
+                  X2: [{ PalletInstance: 50 }, { GeneralIndex: String(assetId) }],
+                },
               },
             },
           },
@@ -235,7 +300,13 @@ export default function App() {
       const feeAssetItem = 0;
       const weightLimit = { Unlimited: null };
 
-      const tx = api.tx.polkadotXcm.limitedReserveTransferAssets(dest as any, beneficiary as any, assets as any, feeAssetItem, weightLimit as any);
+      const tx = api.tx.polkadotXcm.limitedReserveTransferAssets(
+        dest as any,
+        beneficiary as any,
+        assets as any,
+        feeAssetItem,
+        weightLimit as any
+      );
 
       setSubmitLog((s) => s + "Signing & submitting...\n");
 
@@ -281,13 +352,13 @@ export default function App() {
       </header>
 
       <WalletPanel
-        chain={req.from as ChainKey}
+        chain={guardedReq.from as ChainKey}
         onSelectedAddress={setSelectedAddress}
         onChainData={(d) => setWallet((prev) => ({ ...prev, ...d }))}
       />
 
       <SendForm
-        value={req}
+        value={guardedReq}
         onChange={(next) => {
           setReq(next);
           setDryRun(undefined);
@@ -303,11 +374,21 @@ export default function App() {
         canSubmitReal={canSubmitReal}
         onSubmitReal={onSubmitReal}
         submitHelp={submitHelp}
-        warning={undefined}
+        warning={hydraFeeWarning}
       />
 
       {submitLog && (
-        <div style={{ marginTop: 20, padding: 12, borderRadius: 10, background: "#0b0b0b", color: "#e6e6e6", fontSize: 13, overflowX: "auto" }}>
+        <div
+          style={{
+            marginTop: 20,
+            padding: 12,
+            borderRadius: 10,
+            background: "#0b0b0b",
+            color: "#e6e6e6",
+            fontSize: 13,
+            overflowX: "auto",
+          }}
+        >
           <strong>Submit log</strong>
           <pre style={{ marginTop: 10, whiteSpace: "pre-wrap" }}>{submitLog}</pre>
         </div>
