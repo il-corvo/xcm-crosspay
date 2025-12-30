@@ -5,10 +5,14 @@ import { decodeAddress } from "@polkadot/util-crypto";
 
 export type ChainKey = "assethub" | "hydradx";
 
+// Dwellir last on Asset Hub (observed unstable)
 const RPCS: Record<ChainKey, string[]> = {
   assethub: [
     "wss://polkadot-asset-hub-rpc.polkadot.io",
     "wss://rpc-asset-hub-polkadot.luckyfriday.io",
+    "wss://polkadot-asset-hub-rpc.polkadot.io/ws",
+    "wss://asset-hub-polkadot-rpc.dwellir.com",
+    "wss://asset-hub-polkadot-rpc.dwellir.com/ws",
   ],
   hydradx: ["wss://rpc.hydradx.cloud", "wss://hydradx-rpc.dwellir.com"],
 };
@@ -37,8 +41,8 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 
 export type WalletChainData = {
   status: string;
-  balanceDot?: string;
-  edDot?: string;
+  balanceDot?: string; // native free for selected chain (DOT on AssetHub, HDX on Hydra)
+  edDot?: string;      // native ED for selected chain
 };
 
 export function WalletPanel(props: {
@@ -54,14 +58,17 @@ export function WalletPanel(props: {
 
   const [status, setStatus] = useState<string>("Not connected");
 
-  // Native token (DOT on Asset Hub, HDX on Hydra)
+  // Native token info (DOT on Asset Hub, HDX on Hydra)
   const [nativeSymbol, setNativeSymbol] = useState<string>("NATIVE");
   const [nativeBal, setNativeBal] = useState<string>("-");
   const [nativeEd, setNativeEd] = useState<string>("-");
 
-  // USDC display (chain-specific)
+  // Stable balances (chain-aware)
   const [usdcLabel, setUsdcLabel] = useState<string>("USDC");
   const [usdcBal, setUsdcBal] = useState<string>("-");
+
+  const [usdtLabel, setUsdtLabel] = useState<string>("USDT");
+  const [usdtBal, setUsdtBal] = useState<string>("-");
 
   const selectedAccount = useMemo(
     () => accounts.find((a) => a.address === selected),
@@ -124,12 +131,13 @@ export function WalletPanel(props: {
     if (selected) onSelectedAddress?.(selected);
   }, [selected, onSelectedAddress]);
 
-  // 2) Connect RPC + subscribe native + subscribe USDC
+  // 2) Connect RPC + subscribe balances
   useEffect(() => {
     let api: ApiPromise | null = null;
 
     let unsubNative: (() => void) | undefined;
     let unsubUsdc: (() => void) | undefined;
+    let unsubUsdt: (() => void) | undefined;
 
     let cancelled = false;
 
@@ -137,6 +145,7 @@ export function WalletPanel(props: {
       setNativeBal("-");
       setNativeEd("-");
       setUsdcBal("-");
+      setUsdtBal("-");
 
       onChainData?.({ status: "Loading...", balanceDot: undefined, edDot: undefined });
 
@@ -191,43 +200,97 @@ export function WalletPanel(props: {
           onChainData?.({ status: "Live balance (read-only)", balanceDot: balFmt });
         })) as unknown as () => void;
 
-        // USDC subscribe
         if (chain === "assethub") {
-          // Asset Hub: pallet-assets USDC id 1337, SS58 works (proved)
+          // Asset Hub: pallet-assets
           const USDC_ID_AH = 1337;
+          const USDT_ID_AH = 1984;
 
-          const md: any = await api.query.assets.metadata(USDC_ID_AH);
-          const dec = Number(md.decimals?.toString?.() ?? "6");
-          const symHuman = md.symbol?.toHuman?.();
-          const sym = typeof symHuman === "string" ? symHuman : "USDC";
-          setUsdcLabel(`${sym} (Asset Hub)`);
+          // USDC
+          try {
+            const md: any = await api.query.assets.metadata(USDC_ID_AH);
+            const dec = Number(md.decimals?.toString?.() ?? "6");
+            const symHuman = md.symbol?.toHuman?.();
+            const sym = typeof symHuman === "string" ? symHuman : "USDC";
+            setUsdcLabel(`${sym} (Asset Hub)`);
 
-          unsubUsdc = (await api.query.assets.account(USDC_ID_AH, selected, (accOpt: any) => {
-            const h = accOpt.toHuman();
-            if (h === null) {
-              setUsdcBal("0");
-              return;
-            }
-            const bal = BigInt(accOpt.unwrap().balance.toString());
-            setUsdcBal(fmtIntWithDecimals(bal, dec));
-          })) as unknown as () => void;
+            unsubUsdc = (await api.query.assets.account(USDC_ID_AH, selected, (accOpt: any) => {
+              const h = accOpt.toHuman();
+              if (h === null) {
+                setUsdcBal("0");
+                return;
+              }
+              const bal = BigInt(accOpt.unwrap().balance.toString());
+              setUsdcBal(fmtIntWithDecimals(bal, dec));
+            })) as unknown as () => void;
+          } catch (e) {
+            console.warn("USDC subscribe failed:", e);
+            setUsdcLabel("USDC (Asset Hub)");
+            setUsdcBal("-");
+          }
+
+          // USDT
+          try {
+            const md: any = await api.query.assets.metadata(USDT_ID_AH);
+            const dec = Number(md.decimals?.toString?.() ?? "6");
+            const symHuman = md.symbol?.toHuman?.();
+            const sym = typeof symHuman === "string" ? symHuman : "USDT";
+            setUsdtLabel(`${sym} (Asset Hub)`);
+
+            unsubUsdt = (await api.query.assets.account(USDT_ID_AH, selected, (accOpt: any) => {
+              const h = accOpt.toHuman();
+              if (h === null) {
+                setUsdtBal("0");
+                return;
+              }
+              const bal = BigInt(accOpt.unwrap().balance.toString());
+              setUsdtBal(fmtIntWithDecimals(bal, dec));
+            })) as unknown as () => void;
+          } catch (e) {
+            console.warn("USDT subscribe failed:", e);
+            setUsdtLabel("USDT (Asset Hub)");
+            setUsdtBal("-");
+          }
         } else {
           // Hydra/Hydration: ORML tokens + assetRegistry
-          // We detected USDC assetId = 22 in assetRegistry.assets
           const USDC_ID_HYDRA = 22;
-
+          const USDT_ID_HYDRA = 10;
           const who = decodeAddress(selected);
 
-          const a: any = await api.query.assetRegistry.assets(USDC_ID_HYDRA);
-          const human = a.toHuman() as any;
-          const dec = Number(human?.decimals ?? "6");
-          const sym = String(human?.symbol ?? "USDC");
-          setUsdcLabel(`${sym} (Hydra)`);
+          // USDC
+          try {
+            const a: any = await api.query.assetRegistry.assets(USDC_ID_HYDRA);
+            const human = a.toHuman() as any;
+            const dec = Number(human?.decimals ?? "6");
+            const sym = String(human?.symbol ?? "USDC");
+            setUsdcLabel(`${sym} (Hydra)`);
 
-          unsubUsdc = (await api.query.tokens.accounts(who, USDC_ID_HYDRA, (acc: any) => {
-            const free = BigInt(acc.free.toString());
-            setUsdcBal(fmtIntWithDecimals(free, dec));
-          })) as unknown as () => void;
+            unsubUsdc = (await api.query.tokens.accounts(who, USDC_ID_HYDRA, (acc: any) => {
+              const free = BigInt(acc.free.toString());
+              setUsdcBal(fmtIntWithDecimals(free, dec));
+            })) as unknown as () => void;
+          } catch (e) {
+            console.warn("Hydra USDC subscribe failed:", e);
+            setUsdcLabel("USDC (Hydra)");
+            setUsdcBal("-");
+          }
+
+          // USDT
+          try {
+            const a: any = await api.query.assetRegistry.assets(USDT_ID_HYDRA);
+            const human = a.toHuman() as any;
+            const dec = Number(human?.decimals ?? "6");
+            const sym = String(human?.symbol ?? "USDT");
+            setUsdtLabel(`${sym} (Hydra)`);
+
+            unsubUsdt = (await api.query.tokens.accounts(who, USDT_ID_HYDRA, (acc: any) => {
+              const free = BigInt(acc.free.toString());
+              setUsdtBal(fmtIntWithDecimals(free, dec));
+            })) as unknown as () => void;
+          } catch (e) {
+            console.warn("Hydra USDT subscribe failed:", e);
+            setUsdtLabel("USDT (Hydra)");
+            setUsdtBal("-");
+          }
         }
 
         setStatusN("Live balance (read-only)");
@@ -242,6 +305,7 @@ export function WalletPanel(props: {
       cancelled = true;
       try { if (unsubNative) unsubNative(); } catch {}
       try { if (unsubUsdc) unsubUsdc(); } catch {}
+      try { if (unsubUsdt) unsubUsdt(); } catch {}
       try { api?.disconnect(); } catch {}
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -295,7 +359,9 @@ export function WalletPanel(props: {
             <div><b>Chain:</b> {chain}</div>
             <div><b>{nativeSymbol} (free):</b> {nativeBal}</div>
             <div><b>Existential Deposit (ED):</b> {nativeEd} <span style={{ opacity: 0.6 }}>(native)</span></div>
+
             <div><b>{usdcLabel}:</b> {usdcBal}</div>
+            <div><b>{usdtLabel}:</b> {usdtBal}</div>
           </div>
 
           <div style={{ marginTop: 10, fontSize: 13, opacity: 0.7 }}>{edHelp}</div>
