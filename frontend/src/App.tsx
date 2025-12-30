@@ -14,7 +14,7 @@ import type { XcmDryRun } from "../../xcm-engine/dryRun";
 
 import { ApiPromise, WsProvider } from "@polkadot/api";
 import { web3FromAddress } from "@polkadot/extension-dapp";
-import { decodeAddress } from "@polkadot/util-crypto";
+import { decodeAddress, blake2AsHex } from "@polkadot/util-crypto";
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -138,7 +138,6 @@ function logAttemptedAndSomeEvents(
 export default function App() {
   const buildSha = import.meta.env.VITE_BUILD_SHA ?? "dev";
 
-  // Safe-mode defaults
   const [req, setReq] = useState<TransferRequest>({
     from: "assethub",
     to: "hydradx",
@@ -148,16 +147,14 @@ export default function App() {
 
   const [serviceFeeEnabled, setServiceFeeEnabled] = useState(true);
 
-  const [wallet, setWallet] = useState<WalletChainData>({
-    status: "Not connected",
-  });
+  const [wallet, setWallet] = useState<WalletChainData>({ status: "Not connected" });
   const [selectedAddress, setSelectedAddress] = useState<string>("");
 
   const [dryRun, setDryRun] = useState<XcmDryRun | undefined>(undefined);
   const [submitLog, setSubmitLog] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
 
-  // Guard: enforce from != to (typing-safe)
+  // Guard: enforce from != to
   const guardedReq = useMemo<TransferRequest>(() => {
     if (req.from !== req.to) return req;
     const nextTo: TransferRequest["to"] =
@@ -167,19 +164,17 @@ export default function App() {
 
   const errors = useMemo(() => validateRequest(guardedReq), [guardedReq]);
 
-  // Placeholder fee estimate in native token (DOT/HDX)
+  // placeholder network fee estimate (native)
   const networkFeeDotEst = 0.012;
 
   const feeQuote = useMemo(() => {
     if (!serviceFeeEnabled) return makeFeeQuoteNoService(networkFeeDotEst);
-
-    // For stablecoins we keep service fee min-clamped when enabled
     const q = quoteFeesDot(0, networkFeeDotEst, DEFAULT_SERVICE_FEE);
     q.notes = [...q.notes, "Stablecoin transfer: service fee is min-clamped when enabled."];
     return q;
   }, [serviceFeeEnabled]);
 
-  // Safety check based on native token on FROM chain (Asset Hub: DOT, Hydra: HDX)
+  // Safety check based on native token on FROM chain (DOT on AH, HDX on Hydra)
   const balNative = Number(wallet.balanceDot ?? "NaN");
   const edNative = Number(wallet.edDot ?? "NaN");
   const feeTotal = Number(feeQuote.totalFeeDot);
@@ -205,9 +200,7 @@ export default function App() {
       ? "Hydra has 0 HDX. You can receive assets, but you need HDX to send transactions (fees)."
       : undefined;
 
-  // -----------------------------
-  // Real submit support matrix
-  // -----------------------------
+  // Support matrix
   const supportsAhToHydra =
     guardedReq.from === "assethub" &&
     guardedReq.to === "hydradx" &&
@@ -228,12 +221,12 @@ export default function App() {
     supportsAhToHydra
       ? "Real submit: Asset Hub → HydraDX (reserve transfer)."
       : supportsHydraToAh
-      ? "Real submit: HydraDX → Asset Hub (XCM send V4)."
+      ? "Real submit: HydraDX → Asset Hub (XCM send V4, fee separated)."
       : "Safe-mode: only stablecoin routes are enabled (Asset Hub ↔ HydraDX).";
 
   const onDryRun = () => setDryRun(buildXcmDryRun(guardedReq, feeQuote));
 
-  // RPC lists
+  // RPC lists (Dwellir last on Asset Hub)
   const ASSET_HUB_RPCS = [
     "wss://polkadot-asset-hub-rpc.polkadot.io",
     "wss://rpc-asset-hub-polkadot.luckyfriday.io",
@@ -248,7 +241,7 @@ export default function App() {
   ];
 
   // -----------------------------
-  // Asset Hub -> Hydra (USDC/USDT)
+  // Asset Hub -> Hydra (USDC/USDT) reserve transfer
   // -----------------------------
   async function submitAhToHydraStable() {
     const api = await connectApiWithFallback(ASSET_HUB_RPCS, setSubmitLog);
@@ -264,13 +257,9 @@ export default function App() {
 
     const id = decodeAddress(selectedAddress);
     const beneficiary = {
-      V3: {
-        parents: 0,
-        interior: { X1: { AccountId32: { network: null, id } } },
-      },
+      V3: { parents: 0, interior: { X1: { AccountId32: { network: null, id } } } },
     };
 
-    // AssetHub IDs
     const assetId = guardedReq.asset === "USDC_AH" ? 1337 : 1984;
 
     const md: any = await api.query.assets.metadata(assetId);
@@ -340,8 +329,8 @@ export default function App() {
   }
 
   // -----------------------------
-  // Hydra -> Asset Hub (USDC/USDT) via polkadotXcm.send (raw V4)
-  // Template based on Nova output you provided.
+  // Hydra -> Asset Hub (USDC/USDT) via polkadotXcm.send (V4 template)
+  // Fixes: non-zero SetTopic + fee separated from amount
   // -----------------------------
   async function submitHydraToAhSendV4() {
     const api = await connectApiWithFallback(HYDRA_RPCS, setSubmitLog);
@@ -349,7 +338,6 @@ export default function App() {
     const injector = await web3FromAddress(selectedAddress);
     api.setSigner(injector.signer);
 
-    // Destination: Asset Hub parachain
     const ASSET_HUB_PARA = 1000;
 
     const dest = {
@@ -359,14 +347,10 @@ export default function App() {
       },
     };
 
-    // Map asset to Asset Hub GeneralIndex
+    // map to Asset Hub GeneralIndex
     const generalIndex = guardedReq.asset === "USDC_HYDRA" ? "1337" : "1984";
-
-    // Determine decimals on Hydra for parsing:
-    // USDC on Hydra is assetRegistry id 22, USDT is id 10
     const hydraAssetId = guardedReq.asset === "USDC_HYDRA" ? 22 : 10;
 
-    // Read decimals from Hydra assetRegistry
     const a: any = await api.query.assetRegistry.assets(hydraAssetId);
     const human = a.toHuman() as any;
     const decimals: number = Number(human?.decimals ?? "6");
@@ -378,9 +362,25 @@ export default function App() {
     const amountInt = parseDecimalToInt(guardedReq.amount, decimals);
     if (amountInt <= 0n) throw new Error("Amount too small (after decimals).");
 
-    const id = decodeAddress(selectedAddress);
+    // fee separation (Nova-like):
+    // use fixed fee 0.01 (10_000 in 6 decimals) when possible, otherwise clamp
+    let feeInt = 10_000n;
+    if (feeInt >= amountInt) {
+      feeInt = amountInt / 2n;
+      if (feeInt < 1n) feeInt = 1n;
+    }
+    const totalInt = amountInt + feeInt;
+
+    const idBytes = decodeAddress(selectedAddress);
+
+    // Non-zero topic (H256)
+    const topic = blake2AsHex(
+      `${selectedAddress}|${Date.now()}|${Math.random()}|${generalIndex}|${amountInt.toString()}`,
+      256
+    );
 
     // XCM V4 message template (from Nova), parametrized
+    // IMPORTANT: X2 is tuple array, and BuyExecution uses feeInt (not full amount)
     const message = {
       V4: [
         {
@@ -392,7 +392,7 @@ export default function App() {
                   X2: [{ PalletInstance: 50 }, { GeneralIndex: generalIndex }],
                 },
               },
-              fun: { Fungible: amountInt.toString() },
+              fun: { Fungible: totalInt.toString() },
             },
           ],
         },
@@ -406,9 +406,9 @@ export default function App() {
                   X2: [{ PalletInstance: 50 }, { GeneralIndex: generalIndex }],
                 },
               },
-              fun: { Fungible: amountInt.toString() },
+              fun: { Fungible: feeInt.toString() },
             },
-            weight_limit: { Unlimited: null },
+            weightLimit: "Unlimited",
           },
         },
         {
@@ -417,24 +417,17 @@ export default function App() {
             beneficiary: {
               parents: 0,
               interior: {
-                X1: [
-                  {
-                    AccountId32: { network: null, id },
-                  },
-                ],
+                X1: [{ AccountId32: { network: null, id: idBytes } }],
               },
             },
           },
         },
-        // Keep SetTopic (wallets use it); topic can be any bytes32
-        {
-          SetTopic:
-            "0x0000000000000000000000000000000000000000000000000000000000000000",
-        },
+        { SetTopic: topic },
       ],
     };
 
-    // Send XCM
+    setSubmitLog((s) => s + `Fee (execution): ${feeInt.toString()} (units)\n`);
+
     const tx = api.tx.polkadotXcm.send(dest as any, message as any);
 
     setSubmitLog((s) => s + "Signing & submitting...\n");
@@ -477,7 +470,6 @@ export default function App() {
       if (supportsAhToHydra) {
         return await submitAhToHydraStable();
       }
-
       if (supportsHydraToAh) {
         return await submitHydraToAhSendV4();
       }
