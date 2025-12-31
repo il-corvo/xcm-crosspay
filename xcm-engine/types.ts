@@ -1,6 +1,7 @@
 export type ChainKey = "assethub" | "hydradx";
 
 export type AssetKey =
+  | "DOT"
   | "USDC_AH"
   | "USDT_AH"
   | "USDC_HYDRA"

@@ -9,7 +9,7 @@ export function validateRequest(req: TransferRequest): string[] {
     errs.push("Amount must be greater than zero.");
   }
 
-  const allowedAssets = new Set(["USDC_AH", "USDT_AH", "USDC_HYDRA", "USDT_HYDRA"]);
+  const allowedAssets = new Set(["DOT", "USDC_AH", "USDT_AH", "USDC_HYDRA", "USDT_HYDRA"]);
   if (!allowedAssets.has(req.asset)) errs.push("Unsupported asset.");
 
   const allowedChains = new Set(["assethub", "hydradx"]);
