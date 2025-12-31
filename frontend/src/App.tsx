@@ -19,7 +19,6 @@ const MIN_STABLE = 0.10;
 const MIN_DOT_TELEPORT = 0.05;
 
 const DOT_DECIMALS = 10;
-const DOT_BASE = 10n ** 10n;
 
 // Relay bootstrap buffers (prudent, not magic)
 const RELAY_FEE_BUFFER = 10_000_000n;   // 0.01 DOT
