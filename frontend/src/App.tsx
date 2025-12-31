@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import "./App.css";
 
 import { WalletPanel } from "./WalletPanel";
-import type { ChainKey, WalletChainData } from "./WalletPanel";
+import type { WalletChainData } from "./WalletPanel";
 import { SendForm } from "./SendForm";
 
 import type { TransferRequest, FeeQuote } from "../../xcm-engine/types";
@@ -16,12 +16,9 @@ import { web3FromAddress } from "@polkadot/extension-dapp";
 import { decodeAddress } from "@polkadot/util-crypto";
 
 const MIN_STABLE = 0.10;
+const MIN_DOT_TELEPORT = 0.05;
 
-// Advanced DOT execute (guardrails)
-const DOT_EXEC_MIN = 0.05;
-const DOT_EXEC_MAX = 0.50;
 const DOT_DECIMALS = 10;
-const DOT_BASE = 10n ** 10n;
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -118,10 +115,12 @@ function logFinalizedEvents(
         sec === "polkadotXcm" ||
         sec === "xcmpQueue" ||
         sec === "messageQueue" ||
+        sec === "dmpQueue" ||
         sec === "balances" ||
         sec === "assets" ||
         sec === "tokens" ||
-        sec === "system"
+        sec === "system" ||
+        sec === "xcmPallet"
       ) {
         let payload = "";
         try {
@@ -129,18 +128,14 @@ function logFinalizedEvents(
         } catch {
           payload = event.toString();
         }
+        // Keep it readable
+        if (sec === "system" && met !== "ExtrinsicSuccess" && met !== "ExtrinsicFailed") continue;
         lines.push(`${sec}.${met}: ${payload}`);
       }
     }
 
     if (lines.length) {
-      setLog(
-        (s) =>
-          s +
-          `\n--- EVENTS (finalized) ---\n` +
-          lines.join("\n") +
-          `\n--- END EVENTS ---\n`
-      );
+      setLog((s) => s + `\n--- EVENTS (finalized) ---\n${lines.join("\n")}\n--- END EVENTS ---\n`);
     }
   } catch {}
 }
@@ -155,8 +150,6 @@ export default function App() {
     amount: "",
   });
 
-  const [dotExecuteEnabled, setDotExecuteEnabled] = useState(false);
-
   const [serviceFeeEnabled, setServiceFeeEnabled] = useState(true);
 
   const [wallet, setWallet] = useState<WalletChainData>({ status: "Not connected" });
@@ -168,6 +161,7 @@ export default function App() {
 
   const guardedReq = useMemo<TransferRequest>(() => {
     if (req.from !== req.to) return req;
+    // default opposite
     const nextTo: TransferRequest["to"] =
       req.from === "assethub" ? "hydradx" : "assethub";
     return { ...req, to: nextTo };
@@ -175,93 +169,101 @@ export default function App() {
 
   const errors = useMemo(() => validateRequest(guardedReq), [guardedReq]);
 
+  // fee estimate placeholder (native)
   const networkFeeDotEst = 0.012;
 
   const feeQuote = useMemo(() => {
     if (!serviceFeeEnabled) return makeFeeQuoteNoService(networkFeeDotEst);
     const q = quoteFeesDot(0, networkFeeDotEst, DEFAULT_SERVICE_FEE);
-    q.notes = [...q.notes, "Stablecoin transfer: service fee is min-clamped when enabled."];
+    q.notes = [...q.notes, "Service fee toggle is currently informational (not collected on-chain)."];
     return q;
   }, [serviceFeeEnabled]);
 
   const amountNum = Number(guardedReq.amount || "0");
+  const isDot = guardedReq.asset === "DOT";
+  const minOk = isDot
+    ? Number.isFinite(amountNum) && amountNum >= MIN_DOT_TELEPORT
+    : Number.isFinite(amountNum) && amountNum >= MIN_STABLE;
 
-  const balNative = Number(wallet.balanceDot ?? "NaN");
-  const edNative = Number(wallet.edDot ?? "NaN");
-  const feeTotal = Number(feeQuote.totalFeeDot);
-
+  // Safety check: WalletPanel currently supports AH/Hydra.
+  // For Relay we keep safety permissive (small amounts).
+  const fromIsRelay = guardedReq.from === "relay";
   const hasWalletNums =
-    Number.isFinite(balNative) &&
-    Number.isFinite(edNative) &&
-    Number.isFinite(feeTotal);
+    Number.isFinite(Number(wallet.balanceDot ?? "NaN")) &&
+    Number.isFinite(Number(wallet.edDot ?? "NaN")) &&
+    Number.isFinite(Number(feeQuote.totalFeeDot));
 
-  const remaining = hasWalletNums ? balNative - feeTotal : NaN;
-  const safe = hasWalletNums ? remaining >= edNative : false;
+  const remaining = hasWalletNums ? Number(wallet.balanceDot) - Number(feeQuote.totalFeeDot) : NaN;
+  const safe = fromIsRelay ? true : (hasWalletNums ? remaining >= Number(wallet.edDot) : false);
 
-  const safetyMsg = !hasWalletNums
+  const safetyMsg = fromIsRelay
+    ? "Relay: wallet safety check is limited (use small amounts)."
+    : !hasWalletNums
     ? "Wallet data not ready yet."
     : safe
-    ? `OK: remaining native ≈ ${remaining.toFixed(6)} (ED ${edNative}).`
-    : `Too much: would leave ≈ ${remaining.toFixed(6)} (below ED ${edNative}).`;
+    ? `OK: remaining native ≈ ${remaining.toFixed(6)} (ED ${wallet.edDot}).`
+    : `Too much: would leave ≈ ${remaining.toFixed(6)} (below ED ${wallet.edDot}).`;
 
-  const minOkStable = Number.isFinite(amountNum) && amountNum >= MIN_STABLE;
+  const canPreview = errors.length === 0 && safe && minOk;
 
-  const dotExecAmountOk =
-    Number.isFinite(amountNum) &&
-    amountNum >= DOT_EXEC_MIN &&
-    amountNum <= DOT_EXEC_MAX;
-
-  const canPreview = errors.length === 0 && safe && minOkStable;
-
-  const modeLabel =
-    guardedReq.from === "assethub"
-      ? "Asset Hub → HydraDX (reserve transfer)"
-      : "HydraDX → Asset Hub (reserve transfer)";
-
-  const warning =
-    dotExecuteEnabled
-      ? `Advanced DOT execute enabled. Range: ${DOT_EXEC_MIN.toFixed(2)}–${DOT_EXEC_MAX.toFixed(
-          2
-        )} DOT. Use with caution.`
-      : !minOkStable
-      ? `Minimum stablecoin amount is ${MIN_STABLE.toFixed(2)}.`
-      : undefined;
-
-  const supportsAhToHydra =
+  // Supported routes
+  const supportsAhToHydraStable =
     guardedReq.from === "assethub" &&
     guardedReq.to === "hydradx" &&
     (guardedReq.asset === "USDC_AH" || guardedReq.asset === "USDT_AH") &&
     selectedAddress.length > 0;
 
-  const supportsHydraToAh =
+  const supportsHydraToAhStable =
     guardedReq.from === "hydradx" &&
     guardedReq.to === "assethub" &&
     (guardedReq.asset === "USDC_HYDRA" || guardedReq.asset === "USDT_HYDRA") &&
     selectedAddress.length > 0;
 
-  const supportsDotExecute =
-    dotExecuteEnabled &&
+  const supportsAhToRelayDot =
     guardedReq.from === "assethub" &&
-    guardedReq.to === "hydradx" &&
+    guardedReq.to === "relay" &&
     guardedReq.asset === "DOT" &&
-    selectedAddress.length > 0 &&
-    dotExecAmountOk;
+    selectedAddress.length > 0;
+
+  const supportsRelayToAhDot =
+    guardedReq.from === "relay" &&
+    guardedReq.to === "assethub" &&
+    guardedReq.asset === "DOT" &&
+    selectedAddress.length > 0;
 
   const canSubmitReal =
     !submitting &&
-    (supportsDotExecute || (canPreview && (supportsAhToHydra || supportsHydraToAh)));
+    canPreview &&
+    (supportsAhToHydraStable || supportsHydraToAhStable || supportsAhToRelayDot || supportsRelayToAhDot);
+
+  const modeLabel =
+    supportsAhToRelayDot ? "Asset Hub → Relay (DOT teleport)" :
+    supportsRelayToAhDot ? "Relay → Asset Hub (DOT teleport)" :
+    guardedReq.from === "assethub" ? "Asset Hub → HydraDX (reserve transfer)" :
+    guardedReq.from === "hydradx" ? "HydraDX → Asset Hub (reserve transfer)" :
+    "Mode";
+
+  const warning =
+    !minOk
+      ? isDot
+        ? `Minimum DOT teleport amount is ${MIN_DOT_TELEPORT.toFixed(2)}.`
+        : `Minimum stablecoin amount is ${MIN_STABLE.toFixed(2)}.`
+      : undefined;
 
   const submitHelp =
-    supportsDotExecute
-      ? "Real submit: DOT (advanced) via polkadotXcm.execute."
-      : supportsAhToHydra
-      ? "Real submit enabled: stablecoin Asset Hub → HydraDX."
-      : supportsHydraToAh
-      ? "Real submit enabled: stablecoin HydraDX → Asset Hub."
-      : "Unsupported route/asset (safe-mode).";
+    supportsAhToHydraStable
+      ? "Real submit: stablecoin Asset Hub → HydraDX."
+      : supportsHydraToAhStable
+      ? "Real submit: stablecoin HydraDX → Asset Hub."
+      : supportsAhToRelayDot
+      ? "Real submit: DOT teleport Asset Hub → Relay."
+      : supportsRelayToAhDot
+      ? "Real submit: DOT teleport Relay → Asset Hub."
+      : "Unsupported route/asset.";
 
   const onDryRun = () => setDryRun(buildXcmDryRun(guardedReq, feeQuote));
 
+  // RPC lists (Dwellir last on Asset Hub)
   const ASSET_HUB_RPCS = [
     "wss://polkadot-asset-hub-rpc.polkadot.io",
     "wss://rpc-asset-hub-polkadot.luckyfriday.io",
@@ -271,6 +273,11 @@ export default function App() {
   ];
 
   const HYDRA_RPCS = ["wss://rpc.hydradx.cloud", "wss://hydradx-rpc.dwellir.com"];
+
+  const RELAY_RPCS = [
+    "wss://rpc.polkadot.io",
+    "wss://polkadot-rpc.dwellir.com",
+  ];
 
   async function makeTxAhToHydra(api: ApiPromise) {
     const injector = await web3FromAddress(selectedAddress);
@@ -283,7 +290,6 @@ export default function App() {
     const beneficiary = { V3: { parents: 0, interior: { X1: { AccountId32: { network: null, id } } } } };
 
     const assetId = guardedReq.asset === "USDC_AH" ? 1337 : 1984;
-
     const md: any = await api.query.assets.metadata(assetId);
     const decimals: number = Number(md.decimals?.toString?.() ?? "6");
     const symbol: string = String(md.symbol?.toHuman?.() ?? "ASSET");
@@ -295,9 +301,7 @@ export default function App() {
       V3: [
         {
           fun: { Fungible: amountInt.toString() },
-          id: {
-            Concrete: { parents: 0, interior: { X2: [{ PalletInstance: 50 }, { GeneralIndex: String(assetId) }] } },
-          },
+          id: { Concrete: { parents: 0, interior: { X2: [{ PalletInstance: 50 }, { GeneralIndex: String(assetId) }] } } },
         },
       ],
     };
@@ -336,7 +340,11 @@ export default function App() {
             Concrete: {
               parents: 1,
               interior: {
-                X3: [{ Parachain: ASSET_HUB_PARA }, { PalletInstance: 50 }, { GeneralIndex: generalIndex }],
+                X3: [
+                  { Parachain: ASSET_HUB_PARA },
+                  { PalletInstance: 50 },
+                  { GeneralIndex: generalIndex },
+                ],
               },
             },
           },
@@ -347,100 +355,89 @@ export default function App() {
     return api.tx.polkadotXcm.limitedReserveTransferAssets(dest as any, beneficiary as any, assets as any, 0, { Unlimited: null } as any);
   }
 
-  async function makeTxDotExecute(api: ApiPromise) {
+  async function makeTxAhToRelayTeleport(api: ApiPromise) {
     const injector = await web3FromAddress(selectedAddress);
     api.setSigner(injector.signer);
 
-    const amountPlanck = parseDecimalToInt(guardedReq.amount, DOT_DECIMALS);
+    // From your inspected tx:
+    // dest V4: {parents:1, interior:Here}
+    const dest = { V4: { parents: "1", interior: "Here" } };
 
-    // fee prudente: 1% con min 0.01 DOT, max 0.02 DOT
-    const feeMin = 1n * (DOT_BASE / 100n);
-    const feeMax = 2n * (DOT_BASE / 100n);
-    let feePlanck = amountPlanck / 100n;
-    if (feePlanck < feeMin) feePlanck = feeMin;
-    if (feePlanck > feeMax) feePlanck = feeMax;
-    if (feePlanck >= amountPlanck) feePlanck = amountPlanck / 2n;
+    const id = decodeAddress(selectedAddress);
+    const beneficiary = {
+      V4: {
+        parents: "0",
+        interior: { X1: [{ AccountId32: { network: null, id } }] },
+      },
+    };
 
-    const HYDRADX_PARA = 2034;
-    const beneficiaryId = decodeAddress(selectedAddress);
+    const amountInt = parseDecimalToInt(guardedReq.amount, DOT_DECIMALS);
 
-    const message = {
+    const assets = {
       V4: [
         {
-          WithdrawAsset: [
-            {
-              id: { parents: 1, interior: { Here: null } },
-              fun: { Fungible: amountPlanck.toString() },
-            },
-          ],
-        },
-        {
-          BuyExecution: {
-            fees: {
-              id: { parents: 1, interior: { Here: null } },
-              fun: { Fungible: feePlanck.toString() },
-            },
-            weight_limit: { Limited: { proof_size: 1, ref_time: 1 } },
-          },
-        },
-        {
-          DepositReserveAsset: {
-            assets: { Wild: { AllCounted: 1 } },
-            dest: { parents: 1, interior: { X1: [{ Parachain: HYDRADX_PARA }] } },
-            xcm: [
-              {
-                BuyExecution: {
-                  fees: {
-                    id: { parents: 1, interior: { Here: null } },
-                    fun: { Fungible: feePlanck.toString() },
-                  },
-                  weight_limit: { Unlimited: "NULL" },
-                },
-              },
-              {
-                DepositAsset: {
-                  assets: { Wild: { AllCounted: 1 } },
-                  beneficiary: {
-                    parents: 0,
-                    interior: { X1: [{ AccountId32: { network: null, id: beneficiaryId } }] },
-                  },
-                },
-              },
-            ],
-          },
+          id: { parents: "1", interior: "Here" },
+          fun: { Fungible: amountInt.toString() },
         },
       ],
     };
 
-    const maxWeight = { proof_size: 12638, ref_time: 1414876000 };
+    const feeAssetItem = "0";
+    const weightLimit = "Unlimited";
 
-    setSubmitLog((s) => s + `Advanced DOT execute: amount=${amountPlanck.toString()} fee=${feePlanck.toString()}\n`);
-
-    return api.tx.polkadotXcm.execute(message as any, maxWeight as any);
+    return api.tx.polkadotXcm.limitedTeleportAssets(dest as any, beneficiary as any, assets as any, feeAssetItem as any, weightLimit as any);
   }
 
-  function handleToggleDotExecute(enabled: boolean) {
-    setDotExecuteEnabled(enabled);
+  async function makeTxRelayToAhTeleport(api: ApiPromise) {
+    const injector = await web3FromAddress(selectedAddress);
+    api.setSigner(injector.signer);
 
-    // Auto-switch UI to the only supported advanced route
-    if (enabled) {
-      setReq((prev) => ({
-        ...prev,
-        from: "assethub",
-        to: "hydradx",
-        asset: "DOT",
-      }));
-    } else {
-      setReq((prev) => ({
-        ...prev,
-        from: "assethub",
-        to: "hydradx",
-        asset: "USDC_AH",
-      }));
+    // On Relay, the pallet is typically xcmPallet. Some runtimes also expose polkadotXcm.
+    const pallet =
+      (api.tx as any).xcmPallet?.limitedTeleportAssets
+        ? "xcmPallet"
+        : (api.tx as any).polkadotXcm?.limitedTeleportAssets
+        ? "polkadotXcm"
+        : null;
+
+    if (!pallet) {
+      throw new Error("Relay runtime does not expose limitedTeleportAssets (xcmPallet/polkadotXcm).");
     }
 
-    setDryRun(undefined);
-    setSubmitLog("");
+    // dest: Asset Hub parachain 1000 (V4)
+    const dest = {
+      V4: {
+        parents: 0,
+        interior: { X1: [{ Parachain: 1000 }] },
+      },
+    };
+
+    const id = decodeAddress(selectedAddress);
+    const beneficiary = {
+      V4: {
+        parents: 0,
+        interior: { X1: [{ AccountId32: { network: null, id } }] },
+      },
+    };
+
+    const amountInt = parseDecimalToInt(guardedReq.amount, DOT_DECIMALS);
+
+    const assets = {
+      V4: [
+        {
+          id: { parents: 0, interior: "Here" }, // DOT on relay is Here
+          fun: { Fungible: amountInt.toString() },
+        },
+      ],
+    };
+
+    const feeAssetItem = 0;
+    const weightLimit = "Unlimited";
+
+    if (pallet === "xcmPallet") {
+      return (api.tx as any).xcmPallet.limitedTeleportAssets(dest as any, beneficiary as any, assets as any, feeAssetItem, weightLimit as any);
+    }
+    return (api.tx as any).polkadotXcm.limitedTeleportAssets(dest as any, beneficiary as any, assets as any, feeAssetItem, weightLimit as any);
   }
 
   async function onSubmitReal() {
@@ -448,44 +445,12 @@ export default function App() {
     setSubmitting(true);
 
     try {
-      if (supportsDotExecute) {
-        const { api } = await connectApiWithFallback(ASSET_HUB_RPCS, setSubmitLog, "rpc_assethub_last_ok");
-        const tx = await makeTxDotExecute(api);
-
-        setSubmitLog((s) => s + "Signing & submitting...\n");
-
-        let dispatchLogged = false;
-        const unsub = await tx.signAndSend(selectedAddress, (result) => {
-          if (result.status.isFinalized) {
-            setSubmitLog((s) => s + `🎉 Finalized: ${result.status.asFinalized.toString()}\n`);
-            logFinalizedEvents(result, setSubmitLog);
-            try { unsub(); } catch {}
-            api.disconnect().catch(() => {});
-            setSubmitting(false);
-          } else {
-            setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
-          }
-
-          if (result.dispatchError && !dispatchLogged) {
-            dispatchLogged = true;
-            let errMsg = result.dispatchError.toString();
-            if (result.dispatchError.isModule) {
-              const decoded = api.registry.findMetaError(result.dispatchError.asModule);
-              errMsg = `${decoded.section}.${decoded.name}: ${decoded.docs.join(" ")}`;
-            }
-            setSubmitLog((s) => s + `❌ DispatchError: ${errMsg}\n`);
-          }
-        });
-
-        return;
-      }
-
       if (!canPreview) throw new Error("Form is not safe/valid yet.");
 
-      if (supportsAhToHydra) {
+      // Stablecoin AH -> Hydra
+      if (supportsAhToHydraStable) {
         const { api } = await connectApiWithFallback(ASSET_HUB_RPCS, setSubmitLog, "rpc_assethub_last_ok");
         const tx = await makeTxAhToHydra(api);
-
         setSubmitLog((s) => s + "Signing & submitting...\n");
 
         let dispatchLogged = false;
@@ -510,14 +475,13 @@ export default function App() {
             setSubmitLog((s) => s + `❌ DispatchError: ${errMsg}\n`);
           }
         });
-
         return;
       }
 
-      if (supportsHydraToAh) {
+      // Stablecoin Hydra -> AH
+      if (supportsHydraToAhStable) {
         const { api } = await connectApiWithFallback(HYDRA_RPCS, setSubmitLog, "rpc_hydra_last_ok");
         const tx = await makeTxHydraToAh(api);
-
         setSubmitLog((s) => s + "Signing & submitting...\n");
 
         let dispatchLogged = false;
@@ -542,7 +506,68 @@ export default function App() {
             setSubmitLog((s) => s + `❌ DispatchError: ${errMsg}\n`);
           }
         });
+        return;
+      }
 
+      // DOT teleport AH -> Relay
+      if (supportsAhToRelayDot) {
+        const { api } = await connectApiWithFallback(ASSET_HUB_RPCS, setSubmitLog, "rpc_assethub_last_ok");
+        const tx = await makeTxAhToRelayTeleport(api);
+        setSubmitLog((s) => s + "Signing & submitting...\n");
+
+        let dispatchLogged = false;
+        const unsub = await tx.signAndSend(selectedAddress, (result) => {
+          if (result.status.isFinalized) {
+            setSubmitLog((s) => s + `🎉 Finalized: ${result.status.asFinalized.toString()}\n`);
+            logFinalizedEvents(result, setSubmitLog);
+            try { unsub(); } catch {}
+            api.disconnect().catch(() => {});
+            setSubmitting(false);
+          } else {
+            setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
+          }
+
+          if (result.dispatchError && !dispatchLogged) {
+            dispatchLogged = true;
+            let errMsg = result.dispatchError.toString();
+            if (result.dispatchError.isModule) {
+              const decoded = api.registry.findMetaError(result.dispatchError.asModule);
+              errMsg = `${decoded.section}.${decoded.name}: ${decoded.docs.join(" ")}`;
+            }
+            setSubmitLog((s) => s + `❌ DispatchError: ${errMsg}\n`);
+          }
+        });
+        return;
+      }
+
+      // DOT teleport Relay -> AH
+      if (supportsRelayToAhDot) {
+        const { api } = await connectApiWithFallback(RELAY_RPCS, setSubmitLog, "rpc_relay_last_ok");
+        const tx = await makeTxRelayToAhTeleport(api);
+        setSubmitLog((s) => s + "Signing & submitting...\n");
+
+        let dispatchLogged = false;
+        const unsub = await tx.signAndSend(selectedAddress, (result) => {
+          if (result.status.isFinalized) {
+            setSubmitLog((s) => s + `🎉 Finalized: ${result.status.asFinalized.toString()}\n`);
+            logFinalizedEvents(result, setSubmitLog);
+            try { unsub(); } catch {}
+            api.disconnect().catch(() => {});
+            setSubmitting(false);
+          } else {
+            setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
+          }
+
+          if (result.dispatchError && !dispatchLogged) {
+            dispatchLogged = true;
+            let errMsg = result.dispatchError.toString();
+            if (result.dispatchError.isModule) {
+              const decoded = api.registry.findMetaError(result.dispatchError.asModule);
+              errMsg = `${decoded.section}.${decoded.name}: ${decoded.docs.join(" ")}`;
+            }
+            setSubmitLog((s) => s + `❌ DispatchError: ${errMsg}\n`);
+          }
+        });
         return;
       }
 
@@ -552,6 +577,9 @@ export default function App() {
       setSubmitting(false);
     }
   }
+
+  // WalletPanel doesn't support relay yet -> show AssetHub panel when relay selected (temporary)
+  const walletChainForPanel = (guardedReq.from === "relay" ? "assethub" : guardedReq.from) as any;
 
   return (
     <div style={{ maxWidth: 840, margin: "40px auto", padding: "0 16px" }}>
@@ -563,27 +591,10 @@ export default function App() {
       </header>
 
       <WalletPanel
-        chain={guardedReq.from as ChainKey}
+        chain={walletChainForPanel}
         onSelectedAddress={setSelectedAddress}
         onChainData={(d) => setWallet((prev) => ({ ...prev, ...d }))}
       />
-
-      {/* Advanced DOT toggle */}
-      <div style={{ marginTop: 14, border: "1px solid #eee", borderRadius: 12, padding: 12, background: "#fff" }}>
-        <label style={{ display: "flex", gap: 10, alignItems: "center" }}>
-          <input
-            type="checkbox"
-            checked={dotExecuteEnabled}
-            onChange={(e) => handleToggleDotExecute(e.target.checked)}
-          />
-          <span>
-            <b>Advanced:</b> enable DOT Asset Hub → HydraDX via <code>polkadotXcm.execute</code>
-          </span>
-        </label>
-        <div style={{ marginTop: 6, fontSize: 13, opacity: 0.75 }}>
-          Experimental feature. Uses an explicit XCM message (execute). Range: {DOT_EXEC_MIN.toFixed(2)}–{DOT_EXEC_MAX.toFixed(2)} DOT.
-        </div>
-      </div>
 
       <SendForm
         value={guardedReq}
@@ -604,7 +615,7 @@ export default function App() {
         submitHelp={submitHelp}
         warning={warning}
         modeLabel={modeLabel}
-        advancedDotEnabled={dotExecuteEnabled}
+        advancedDotEnabled={false}
       />
 
       {submitLog && (

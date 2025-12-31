@@ -9,13 +9,13 @@ export function validateRequest(req: TransferRequest): string[] {
     errs.push("Amount must be greater than zero.");
   }
 
-  const allowedAssets = new Set(["DOT", "USDC_AH", "USDT_AH", "USDC_HYDRA", "USDT_HYDRA"]);
-  if (!allowedAssets.has(req.asset)) errs.push("Unsupported asset.");
-
-  const allowedChains = new Set(["assethub", "hydradx"]);
+  const allowedChains = new Set(["assethub", "hydradx", "relay"]);
   if (!allowedChains.has(req.from) || !allowedChains.has(req.to)) {
     errs.push("Unsupported chain.");
   }
+
+  const allowedAssets = new Set(["DOT", "USDC_AH", "USDT_AH", "USDC_HYDRA", "USDT_HYDRA"]);
+  if (!allowedAssets.has(req.asset)) errs.push("Unsupported asset.");
 
   return errs;
 }

@@ -4,6 +4,7 @@ import { validateRequest } from "../../xcm-engine/validate";
 
 const CHAINS = [
   { key: "assethub", name: "Polkadot Asset Hub" },
+  { key: "relay", name: "Polkadot Relay" },
   { key: "hydradx", name: "HydraDX" },
 ] as const;
 
@@ -28,7 +29,7 @@ export function SendForm(props: {
   warning?: string;
   modeLabel: string;
 
-  advancedDotEnabled: boolean;
+  advancedDotEnabled: boolean; // keep for your existing UI (can be unused now)
 }) {
   const {
     value,
@@ -50,62 +51,47 @@ export function SendForm(props: {
 
   const errors = validateRequest(value);
 
-  const toOptions =
-    value.from === "assethub"
-      ? [{ key: "hydradx", name: "HydraDX" }]
-      : [{ key: "assethub", name: "Polkadot Asset Hub" }];
-
+  // Asset options depend on FROM chain and mode
   const assetOptions =
-  value.from === "assethub"
-    ? [
-        ...(advancedDotEnabled ? [{ key: "DOT", label: "DOT (Advanced execute)" }] : []),
-        { key: "USDC_AH", label: "USDC (Asset Hub)" },
-        { key: "USDT_AH", label: "USDT (Asset Hub)" },
-      ]
-    : [
-        { key: "USDC_HYDRA", label: "USDC (Hydra)" },
-        { key: "USDT_HYDRA", label: "USDT (Hydra)" },
-      ];
+    value.from === "assethub"
+      ? [
+          { key: "DOT", label: "DOT" },
+          { key: "USDC_AH", label: "USDC (Asset Hub)" },
+          { key: "USDT_AH", label: "USDT (Asset Hub)" },
+        ]
+      : value.from === "relay"
+      ? [{ key: "DOT", label: "DOT" }]
+      : [
+          { key: "USDC_HYDRA", label: "USDC (Hydra)" },
+          { key: "USDT_HYDRA", label: "USDT (Hydra)" },
+        ];
 
+  // To options depend on asset:
+  // - DOT supports AssetHub <-> Relay
+  // - Stablecoins support AssetHub <-> Hydra
+  const toOptions =
+    value.asset === "DOT"
+      ? value.from === "assethub"
+        ? [{ key: "relay", name: "Polkadot Relay" }]
+        : value.from === "relay"
+        ? [{ key: "assethub", name: "Polkadot Asset Hub" }]
+        : []
+      : value.from === "assethub"
+      ? [{ key: "hydradx", name: "HydraDX" }]
+      : value.from === "hydradx"
+      ? [{ key: "assethub", name: "Polkadot Asset Hub" }]
+      : [];
 
   return (
-    <div
-      style={{
-        border: "1px solid #e5e5e5",
-        borderRadius: 12,
-        padding: 16,
-        background: "#fff",
-        marginTop: 20,
-      }}
-    >
+    <div style={{ border: "1px solid #e5e5e5", borderRadius: 12, padding: 16, background: "#fff", marginTop: 20 }}>
       <h2 style={{ marginTop: 0 }}>Send</h2>
 
-      {/* Mode banner */}
-      <div
-        style={{
-          marginTop: 10,
-          border: "1px solid #eaeaea",
-          background: "#fafafa",
-          padding: 10,
-          borderRadius: 10,
-          fontSize: 13,
-        }}
-      >
+      <div style={{ marginTop: 10, border: "1px solid #eaeaea", background: "#fafafa", padding: 10, borderRadius: 10, fontSize: 13 }}>
         <b>Mode:</b> {modeLabel}
       </div>
 
-      {/* Optional warning */}
       {warning && (
-        <div
-          style={{
-            marginTop: 10,
-            border: "1px solid #ffe2a8",
-            background: "#fff8e6",
-            padding: 12,
-            borderRadius: 10,
-            fontSize: 13,
-          }}
-        >
+        <div style={{ marginTop: 10, border: "1px solid #ffe2a8", background: "#fff8e6", padding: 12, borderRadius: 10, fontSize: 13 }}>
           <b>Note:</b> {warning}
         </div>
       )}
@@ -116,11 +102,22 @@ export function SendForm(props: {
           <select
             value={value.from}
             onChange={(e) => {
-              const nextFrom = e.target.value as TransferRequest["from"];
-              const nextTo: TransferRequest["to"] =
-                nextFrom === "assethub" ? "hydradx" : "assethub";
-              const nextAsset: TransferRequest["asset"] =
-                nextFrom === "assethub" ? "USDC_AH" : "USDC_HYDRA";
+              const nextFrom = e.target.value as any;
+
+              // keep asset valid when switching chain
+              let nextAsset = value.asset;
+              if (nextFrom === "relay") nextAsset = "DOT";
+              if (nextFrom === "hydradx" && nextAsset === "DOT") nextAsset = "USDC_HYDRA";
+              if (nextFrom === "assethub" && nextAsset === "USDC_HYDRA") nextAsset = "USDC_AH";
+
+              // auto-adjust destination
+              let nextTo = value.to;
+              if (nextAsset === "DOT") {
+                nextTo = nextFrom === "relay" ? "assethub" : "relay";
+              } else {
+                nextTo = nextFrom === "hydradx" ? "assethub" : "hydradx";
+              }
+
               onChange({ ...value, from: nextFrom, to: nextTo, asset: nextAsset });
             }}
             style={{ width: "100%", padding: 10, borderRadius: 8 }}
@@ -152,7 +149,18 @@ export function SendForm(props: {
           <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>Asset</div>
           <select
             value={value.asset}
-            onChange={(e) => onChange({ ...value, asset: e.target.value as any })}
+            onChange={(e) => {
+              const nextAsset = e.target.value as any;
+              let nextTo = value.to;
+
+              if (nextAsset === "DOT") {
+                nextTo = value.from === "relay" ? "assethub" : "relay";
+              } else {
+                nextTo = value.from === "hydradx" ? "assethub" : "hydradx";
+              }
+
+              onChange({ ...value, asset: nextAsset, to: nextTo });
+            }}
             style={{ width: "100%", padding: 10, borderRadius: 8 }}
           >
             {assetOptions.map((a) => (
@@ -168,29 +176,15 @@ export function SendForm(props: {
           <input
             value={value.amount}
             onChange={(e) => onChange({ ...value, amount: e.target.value })}
-            placeholder="e.g. 1.00"
+            placeholder="e.g. 0.10"
             inputMode="decimal"
-            style={{
-              width: "100%",
-              padding: 10,
-              borderRadius: 8,
-              border: "1px solid #ddd",
-            }}
+            style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #ddd" }}
           />
         </label>
       </div>
 
-      {/* ERRORS */}
       {errors.length > 0 && (
-        <div
-          style={{
-            marginTop: 14,
-            border: "1px solid #f0c9c9",
-            background: "#fff6f6",
-            padding: 12,
-            borderRadius: 10,
-          }}
-        >
+        <div style={{ marginTop: 14, border: "1px solid #f0c9c9", background: "#fff6f6", padding: 12, borderRadius: 10 }}>
           <strong>Fix required</strong>
           <ul style={{ marginTop: 8 }}>
             {errors.map((e, i) => (
@@ -200,16 +194,7 @@ export function SendForm(props: {
         </div>
       )}
 
-      {/* FEES */}
-      <div
-        style={{
-          marginTop: 14,
-          border: "1px solid #eaeaea",
-          background: "#fafafa",
-          padding: 12,
-          borderRadius: 10,
-        }}
-      >
+      <div style={{ marginTop: 14, border: "1px solid #eaeaea", background: "#fafafa", padding: 12, borderRadius: 10 }}>
         <strong>Fees (estimate)</strong>
 
         <div style={{ marginTop: 8, display: "grid", gap: 4 }}>
@@ -228,67 +213,34 @@ export function SendForm(props: {
           </ul>
         )}
 
-        {/* Service fee checkbox */}
         <div style={{ marginTop: 12 }}>
           <label style={{ display: "flex", gap: 10, alignItems: "center" }}>
-            <input
-              type="checkbox"
-              checked={serviceFeeEnabled}
-              onChange={(e) => onToggleServiceFee(e.target.checked)}
-            />
+            <input type="checkbox" checked={serviceFeeEnabled} onChange={(e) => onToggleServiceFee(e.target.checked)} />
             <span>Include service fee (default on)</span>
           </label>
 
           <div style={{ marginTop: 6, fontSize: 13, opacity: 0.7 }}>
-            Service fees help fund development and maintenance of this non-custodial dApp.
-            You can disable them if you prefer.
+            Service fees help fund development and maintenance of this non-custodial dApp. You can disable them if you prefer.
           </div>
-
           <div style={{ marginTop: 6, fontSize: 13, opacity: 0.7 }}>
             <b>Note:</b> service fee is currently <b>informational</b> (not yet collected on-chain).
           </div>
-
-          {!serviceFeeEnabled && (
-            <div style={{ marginTop: 6, fontSize: 13, opacity: 0.75 }}>
-              Service fee disabled. Consider enabling it to support the project.
-            </div>
-          )}
         </div>
 
         <div style={{ marginTop: 12, fontSize: 13, opacity: 0.7 }}>{safetyMsg}</div>
       </div>
 
-      {/* Preview */}
       <button
         disabled={!canPreview}
-        style={{
-          marginTop: 14,
-          width: "100%",
-          padding: 12,
-          borderRadius: 10,
-          border: "none",
-          cursor: canPreview ? "pointer" : "not-allowed",
-          opacity: canPreview ? 1 : 0.5,
-        }}
+        style={{ marginTop: 14, width: "100%", padding: 12, borderRadius: 10, border: "none", cursor: canPreview ? "pointer" : "not-allowed", opacity: canPreview ? 1 : 0.5 }}
         onClick={onDryRun}
       >
         {canPreview ? "Preview XCM (dry-run)" : "Fix fields / wallet safety to continue"}
       </button>
 
-      {/* Submit */}
       <button
         disabled={!canSubmitReal}
-        style={{
-          marginTop: 10,
-          width: "100%",
-          padding: 12,
-          borderRadius: 10,
-          border: "1px solid #111",
-          background: canSubmitReal ? "#111" : "#777",
-          color: "#fff",
-          cursor: canSubmitReal ? "pointer" : "not-allowed",
-          opacity: canSubmitReal ? 1 : 0.7,
-        }}
+        style={{ marginTop: 10, width: "100%", padding: 12, borderRadius: 10, border: "1px solid #111", background: canSubmitReal ? "#111" : "#777", color: "#fff", cursor: canSubmitReal ? "pointer" : "not-allowed", opacity: canSubmitReal ? 1 : 0.7 }}
         onClick={onSubmitReal}
       >
         Submit (REAL)
@@ -297,17 +249,7 @@ export function SendForm(props: {
       <div style={{ marginTop: 8, fontSize: 13, opacity: 0.7 }}>{submitHelp}</div>
 
       {dryRun && (
-        <div
-          style={{
-            marginTop: 20,
-            padding: 12,
-            borderRadius: 10,
-            background: "#0b0b0b",
-            color: "#e6e6e6",
-            fontSize: 13,
-            overflowX: "auto",
-          }}
-        >
+        <div style={{ marginTop: 20, padding: 12, borderRadius: 10, background: "#0b0b0b", color: "#e6e6e6", fontSize: 13, overflowX: "auto" }}>
           <strong>XCM dry-run preview</strong>
           <pre style={{ marginTop: 10 }}>{JSON.stringify(dryRun, null, 2)}</pre>
         </div>
