@@ -454,7 +454,7 @@ export default function App() {
         setSubmitLog((s) => s + "Signing & submitting...\n");
 
         let dispatchLogged = false;
-        const unsub = await tx.signAndSend(selectedAddress, (result) => {
+        const unsub = await tx.signAndSend(selectedAddress, (result: any) => {
           if (result.status.isFinalized) {
             setSubmitLog((s) => s + `🎉 Finalized: ${result.status.asFinalized.toString()}\n`);
             logFinalizedEvents(result, setSubmitLog);
@@ -485,7 +485,7 @@ export default function App() {
         setSubmitLog((s) => s + "Signing & submitting...\n");
 
         let dispatchLogged = false;
-        const unsub = await tx.signAndSend(selectedAddress, (result) => {
+        const unsub = await tx.signAndSend(selectedAddress, (result: any) => {
           if (result.status.isFinalized) {
             setSubmitLog((s) => s + `🎉 Finalized: ${result.status.asFinalized.toString()}\n`);
             logFinalizedEvents(result, setSubmitLog);
@@ -516,7 +516,7 @@ export default function App() {
         setSubmitLog((s) => s + "Signing & submitting...\n");
 
         let dispatchLogged = false;
-        const unsub = await tx.signAndSend(selectedAddress, (result) => {
+        const unsub = await tx.signAndSend(selectedAddress, (result: any) => {
           if (result.status.isFinalized) {
             setSubmitLog((s) => s + `🎉 Finalized: ${result.status.asFinalized.toString()}\n`);
             logFinalizedEvents(result, setSubmitLog);
@@ -547,7 +547,7 @@ export default function App() {
         setSubmitLog((s) => s + "Signing & submitting...\n");
 
         let dispatchLogged = false;
-        const unsub = await tx.signAndSend(selectedAddress, (result) => {
+        const unsub = await tx.signAndSend(selectedAddress, (result: any) => {
           if (result.status.isFinalized) {
             setSubmitLog((s) => s + `🎉 Finalized: ${result.status.asFinalized.toString()}\n`);
             logFinalizedEvents(result, setSubmitLog);

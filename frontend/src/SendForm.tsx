@@ -46,7 +46,7 @@ export function SendForm(props: {
     submitHelp,
     warning,
     modeLabel,
-    advancedDotEnabled,
+    advancedDotEnabled: _advancedDotEnabled,
   } = props;
 
   const errors = validateRequest(value);
