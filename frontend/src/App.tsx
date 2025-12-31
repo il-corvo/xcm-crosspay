@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import "./App.css";
 
 import { WalletPanel } from "./WalletPanel";
@@ -19,6 +19,11 @@ const MIN_STABLE = 0.10;
 const MIN_DOT_TELEPORT = 0.05;
 
 const DOT_DECIMALS = 10;
+const DOT_BASE = 10n ** 10n;
+
+// Relay bootstrap buffers (prudent, not magic)
+const RELAY_FEE_BUFFER = 10_000_000n;   // 0.01 DOT
+const RELAY_SAFETY_BUFFER = 50_000_000n; // 0.05 DOT
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -48,6 +53,13 @@ function parseDecimalToInt(amount: string, decimals: number): bigint {
   const base = 10n ** BigInt(decimals);
 
   return whole * base + fracInt;
+}
+
+function fmtPlanckToDot(planck: bigint): string {
+  const s = planck.toString().padStart(DOT_DECIMALS + 1, "0");
+  const whole = s.slice(0, -DOT_DECIMALS);
+  const frac = s.slice(-DOT_DECIMALS).replace(/0+$/, "");
+  return frac ? `${whole}.${frac}` : whole;
 }
 
 function makeFeeQuoteNoService(networkFeeDotEst: number): FeeQuote {
@@ -128,7 +140,6 @@ function logFinalizedEvents(
         } catch {
           payload = event.toString();
         }
-        // Keep it readable
         if (sec === "system" && met !== "ExtrinsicSuccess" && met !== "ExtrinsicFailed") continue;
         lines.push(`${sec}.${met}: ${payload}`);
       }
@@ -139,6 +150,13 @@ function logFinalizedEvents(
     }
   } catch {}
 }
+
+type RelayProbe = {
+  free: bigint;
+  ed: bigint;
+  ok: boolean;
+  lastUpdatedMs: number;
+};
 
 export default function App() {
   const buildSha = import.meta.env.VITE_BUILD_SHA ?? "dev";
@@ -159,52 +177,114 @@ export default function App() {
   const [submitLog, setSubmitLog] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
 
+  const [relayProbe, setRelayProbe] = useState<RelayProbe | null>(null);
+
   const guardedReq = useMemo<TransferRequest>(() => {
     if (req.from !== req.to) return req;
-    // default opposite
-    const nextTo: TransferRequest["to"] =
-      req.from === "assethub" ? "hydradx" : "assethub";
+    const nextTo: TransferRequest["to"] = req.from === "assethub" ? "hydradx" : "assethub";
     return { ...req, to: nextTo };
   }, [req]);
 
   const errors = useMemo(() => validateRequest(guardedReq), [guardedReq]);
 
-  // fee estimate placeholder (native)
-  const networkFeeDotEst = 0.012;
+  const isDot = guardedReq.asset === "DOT";
+  const isRelayMode = guardedReq.from === "relay" || guardedReq.to === "relay";
+  const isAhToRelayDot = guardedReq.from === "assethub" && guardedReq.to === "relay" && guardedReq.asset === "DOT";
 
-  const feeQuote = useMemo(() => {
+  // Fee quote: relay mode is on-chain, no service fee / no fake estimate
+  const networkFeeDotEst = 0.012;
+  const feeQuote = useMemo<FeeQuote>(() => {
+    if (isRelayMode) {
+      return {
+        networkFeeDotEst: "-",
+        serviceFeeDot: "-",
+        totalFeeDot: "-",
+        notes: [
+          "Relay mode: fees are paid on-chain.",
+          "Small teleports may be largely consumed by execution costs.",
+        ],
+      };
+    }
     if (!serviceFeeEnabled) return makeFeeQuoteNoService(networkFeeDotEst);
     const q = quoteFeesDot(0, networkFeeDotEst, DEFAULT_SERVICE_FEE);
-    q.notes = [...q.notes, "Service fee toggle is currently informational (not collected on-chain)."];
+    q.notes = [...q.notes, "Service fee toggle is informational (not collected on-chain)."];
     return q;
-  }, [serviceFeeEnabled]);
+  }, [isRelayMode, serviceFeeEnabled]);
 
   const amountNum = Number(guardedReq.amount || "0");
-  const isDot = guardedReq.asset === "DOT";
-  const minOk = isDot
+  const minOkBase = isDot
     ? Number.isFinite(amountNum) && amountNum >= MIN_DOT_TELEPORT
     : Number.isFinite(amountNum) && amountNum >= MIN_STABLE;
 
-  // Safety check: WalletPanel currently supports AH/Hydra.
-  // For Relay we keep safety permissive (small amounts).
-  const fromIsRelay = guardedReq.from === "relay";
-  const hasWalletNums =
-    Number.isFinite(Number(wallet.balanceDot ?? "NaN")) &&
-    Number.isFinite(Number(wallet.edDot ?? "NaN")) &&
-    Number.isFinite(Number(feeQuote.totalFeeDot));
+  // Relay bootstrap guard (dynamic): only applies to AH->Relay DOT
+  const amountPlanck = isDot ? parseDecimalToInt(guardedReq.amount, DOT_DECIMALS) : 0n;
 
-  const remaining = hasWalletNums ? Number(wallet.balanceDot) - Number(feeQuote.totalFeeDot) : NaN;
-  const safe = fromIsRelay ? true : (hasWalletNums ? remaining >= Number(wallet.edDot) : false);
+  const relayBootstrapNeeded = useMemo(() => {
+    if (!isAhToRelayDot) return null;
+    if (!relayProbe) return null;
 
-  const safetyMsg = fromIsRelay
-    ? "Relay: wallet safety check is limited (use small amounts)."
-    : !hasWalletNums
+    // If relayFree >= ED, no hard requirement.
+    if (relayProbe.free >= relayProbe.ed) return { required: 0n, reason: "relay_above_ed" as const };
+
+    // Need at least ED + buffers on relay after execution costs.
+    const deficit = relayProbe.ed - relayProbe.free;
+    const required = deficit + RELAY_FEE_BUFFER + RELAY_SAFETY_BUFFER;
+    return { required, reason: "relay_below_ed" as const };
+  }, [isAhToRelayDot, relayProbe]);
+
+  const relayBootstrapOk = useMemo(() => {
+    if (!isAhToRelayDot) return true;
+    if (!relayBootstrapNeeded) return false; // not ready -> be conservative
+    if (relayBootstrapNeeded.required === 0n) return true;
+    return amountPlanck >= relayBootstrapNeeded.required;
+  }, [isAhToRelayDot, relayBootstrapNeeded, amountPlanck]);
+
+  const minOk = minOkBase && relayBootstrapOk;
+
+  // Safety message (walletPanel is AH/Hydra only; relay is special)
+  const safetyMsg = isRelayMode
+    ? "Relay note: DOT may not appear as a transferable balance for small teleports. Execution can consume a significant share. Consider bootstrapping Relay with a larger first transfer."
+    : !Number.isFinite(Number(wallet.balanceDot ?? "NaN")) || !Number.isFinite(Number(wallet.edDot ?? "NaN"))
     ? "Wallet data not ready yet."
-    : safe
-    ? `OK: remaining native ≈ ${remaining.toFixed(6)} (ED ${wallet.edDot}).`
-    : `Too much: would leave ≈ ${remaining.toFixed(6)} (below ED ${wallet.edDot}).`;
+    : `OK: keep a native buffer above ED (${wallet.edDot}).`;
 
-  const canPreview = errors.length === 0 && safe && minOk;
+  // Optional relay note for UI
+  const relayNote = useMemo(() => {
+    if (!isAhToRelayDot) return undefined;
+
+    if (!relayProbe) {
+      return "Reading Relay balance/ED…";
+    }
+
+    const free = fmtPlanckToDot(relayProbe.free);
+    const ed = fmtPlanckToDot(relayProbe.ed);
+
+    if (relayProbe.free >= relayProbe.ed) {
+      return `Relay free ≈ ${free} DOT (ED ≈ ${ed}). Account is above ED. Small teleports are less risky.`;
+    }
+
+    const reqMin = relayBootstrapNeeded?.required ?? 0n;
+    const reqMinDot = fmtPlanckToDot(reqMin);
+
+    return `Relay free ≈ ${free} DOT (ED ≈ ${ed}). Relay is below ED: block small teleports. Minimum required now ≈ ${reqMinDot} DOT.`;
+  }, [isAhToRelayDot, relayProbe, relayBootstrapNeeded]);
+
+  const warning = useMemo(() => {
+    if (isRelayMode) {
+      return "Relay mode: fees are on-chain. For first-time Relay bootstrap, send enough DOT to stay above ED after execution.";
+    }
+    if (!minOkBase) {
+      return isDot
+        ? `Minimum DOT amount is ${MIN_DOT_TELEPORT.toFixed(2)}.`
+        : `Minimum stablecoin amount is ${MIN_STABLE.toFixed(2)}.`;
+    }
+    if (!relayBootstrapOk && relayBootstrapNeeded?.required) {
+      return `Relay bootstrap required: send at least ${fmtPlanckToDot(relayBootstrapNeeded.required)} DOT (Relay is currently below ED).`;
+    }
+    return undefined;
+  }, [isRelayMode, minOkBase, isDot, relayBootstrapOk, relayBootstrapNeeded]);
+
+  const canPreview = errors.length === 0 && minOk;
 
   // Supported routes
   const supportsAhToHydraStable =
@@ -243,13 +323,6 @@ export default function App() {
     guardedReq.from === "hydradx" ? "HydraDX → Asset Hub (reserve transfer)" :
     "Mode";
 
-  const warning =
-    !minOk
-      ? isDot
-        ? `Minimum DOT teleport amount is ${MIN_DOT_TELEPORT.toFixed(2)}.`
-        : `Minimum stablecoin amount is ${MIN_STABLE.toFixed(2)}.`
-      : undefined;
-
   const submitHelp =
     supportsAhToHydraStable
       ? "Real submit: stablecoin Asset Hub → HydraDX."
@@ -258,12 +331,12 @@ export default function App() {
       : supportsAhToRelayDot
       ? "Real submit: DOT teleport Asset Hub → Relay."
       : supportsRelayToAhDot
-      ? "Real submit: DOT teleport Relay → Asset Hub."
+      ? "Real submit: DOT teleport Relay → Asset Hub (requires DOT spendable on Relay for fees)."
       : "Unsupported route/asset.";
 
   const onDryRun = () => setDryRun(buildXcmDryRun(guardedReq, feeQuote));
 
-  // RPC lists (Dwellir last on Asset Hub)
+  // RPC lists
   const ASSET_HUB_RPCS = [
     "wss://polkadot-asset-hub-rpc.polkadot.io",
     "wss://rpc-asset-hub-polkadot.luckyfriday.io",
@@ -278,6 +351,47 @@ export default function App() {
     "wss://rpc.polkadot.io",
     "wss://polkadot-rpc.dwellir.com",
   ];
+
+  // Relay probe: read relay free + ED when needed (AH->Relay DOT, or from relay)
+  useEffect(() => {
+    let cancelled = false;
+    let api: ApiPromise | null = null;
+
+    async function run() {
+      if (!selectedAddress) return;
+
+      const needRelayProbe = isAhToRelayDot || guardedReq.from === "relay";
+      if (!needRelayProbe) return;
+
+      try {
+        const { api: relayApi } = await connectApiWithFallback(RELAY_RPCS, () => {}, "rpc_relay_last_ok");
+        api = relayApi;
+
+        const edStr = api.consts.balances?.existentialDeposit?.toString?.() ?? "0";
+        const ed = BigInt(edStr);
+
+        const info: any = await api.query.system.account(selectedAddress);
+        const free = BigInt(info.data.free.toString());
+
+        if (cancelled) return;
+
+        setRelayProbe({
+          free,
+          ed,
+          ok: true,
+          lastUpdatedMs: Date.now(),
+        });
+      } catch {
+        if (cancelled) return;
+        setRelayProbe(null);
+      } finally {
+        try { api?.disconnect(); } catch {}
+      }
+    }
+
+    run();
+    return () => { cancelled = true; try { api?.disconnect(); } catch {} };
+  }, [selectedAddress, isAhToRelayDot, guardedReq.from]);
 
   async function makeTxAhToHydra(api: ApiPromise) {
     const injector = await web3FromAddress(selectedAddress);
@@ -359,8 +473,8 @@ export default function App() {
     const injector = await web3FromAddress(selectedAddress);
     api.setSigner(injector.signer);
 
-    // From your inspected tx:
-    // dest V4: {parents:1, interior:Here}
+    // From inspected tx:
+    // dest V4: {parents:1, interior:Here} => Relay
     const dest = { V4: { parents: "1", interior: "Here" } };
 
     const id = decodeAddress(selectedAddress);
@@ -382,17 +496,13 @@ export default function App() {
       ],
     };
 
-    const feeAssetItem = "0";
-    const weightLimit = "Unlimited";
-
-    return api.tx.polkadotXcm.limitedTeleportAssets(dest as any, beneficiary as any, assets as any, feeAssetItem as any, weightLimit as any);
+    return api.tx.polkadotXcm.limitedTeleportAssets(dest as any, beneficiary as any, assets as any, "0" as any, "Unlimited" as any);
   }
 
   async function makeTxRelayToAhTeleport(api: ApiPromise) {
     const injector = await web3FromAddress(selectedAddress);
     api.setSigner(injector.signer);
 
-    // On Relay, the pallet is typically xcmPallet. Some runtimes also expose polkadotXcm.
     const pallet =
       (api.tx as any).xcmPallet?.limitedTeleportAssets
         ? "xcmPallet"
@@ -404,11 +514,10 @@ export default function App() {
       throw new Error("Relay runtime does not expose limitedTeleportAssets (xcmPallet/polkadotXcm).");
     }
 
-    // dest: Asset Hub parachain 1000 (V4)
     const dest = {
       V4: {
         parents: 0,
-        interior: { X1: [{ Parachain: 1000 }] },
+        interior: { X1: [{ Parachain: 1000 }] }, // Asset Hub
       },
     };
 
@@ -425,7 +534,7 @@ export default function App() {
     const assets = {
       V4: [
         {
-          id: { parents: 0, interior: "Here" }, // DOT on relay is Here
+          id: { parents: 0, interior: "Here" }, // DOT on relay
           fun: { Fungible: amountInt.toString() },
         },
       ],
@@ -447,7 +556,6 @@ export default function App() {
     try {
       if (!canPreview) throw new Error("Form is not safe/valid yet.");
 
-      // Stablecoin AH -> Hydra
       if (supportsAhToHydraStable) {
         const { api } = await connectApiWithFallback(ASSET_HUB_RPCS, setSubmitLog, "rpc_assethub_last_ok");
         const tx = await makeTxAhToHydra(api);
@@ -478,7 +586,6 @@ export default function App() {
         return;
       }
 
-      // Stablecoin Hydra -> AH
       if (supportsHydraToAhStable) {
         const { api } = await connectApiWithFallback(HYDRA_RPCS, setSubmitLog, "rpc_hydra_last_ok");
         const tx = await makeTxHydraToAh(api);
@@ -509,7 +616,6 @@ export default function App() {
         return;
       }
 
-      // DOT teleport AH -> Relay
       if (supportsAhToRelayDot) {
         const { api } = await connectApiWithFallback(ASSET_HUB_RPCS, setSubmitLog, "rpc_assethub_last_ok");
         const tx = await makeTxAhToRelayTeleport(api);
@@ -540,7 +646,6 @@ export default function App() {
         return;
       }
 
-      // DOT teleport Relay -> AH
       if (supportsRelayToAhDot) {
         const { api } = await connectApiWithFallback(RELAY_RPCS, setSubmitLog, "rpc_relay_last_ok");
         const tx = await makeTxRelayToAhTeleport(api);
@@ -571,14 +676,14 @@ export default function App() {
         return;
       }
 
-      throw new Error("Unsupported route/asset (safe-mode).");
+      throw new Error("Unsupported route/asset.");
     } catch (e: any) {
       setSubmitLog((s) => s + `❌ Error: ${e?.message ?? String(e)}\n`);
       setSubmitting(false);
     }
   }
 
-  // WalletPanel doesn't support relay yet -> show AssetHub panel when relay selected (temporary)
+  // WalletPanel doesn't support relay yet: show AssetHub panel when relay selected (temporary)
   const walletChainForPanel = (guardedReq.from === "relay" ? "assethub" : guardedReq.from) as any;
 
   return (
@@ -616,6 +721,8 @@ export default function App() {
         warning={warning}
         modeLabel={modeLabel}
         advancedDotEnabled={false}
+        relayNote={relayNote}
+        hideServiceFee={isRelayMode}
       />
 
       {submitLog && (

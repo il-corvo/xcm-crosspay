@@ -29,7 +29,11 @@ export function SendForm(props: {
   warning?: string;
   modeLabel: string;
 
-  advancedDotEnabled: boolean; // keep for your existing UI (can be unused now)
+  advancedDotEnabled: boolean;
+
+  // NEW: relay bootstrap info
+  relayNote?: string;
+  hideServiceFee?: boolean;
 }) {
   const {
     value,
@@ -47,11 +51,12 @@ export function SendForm(props: {
     warning,
     modeLabel,
     advancedDotEnabled: _advancedDotEnabled,
+    relayNote,
+    hideServiceFee,
   } = props;
 
   const errors = validateRequest(value);
 
-  // Asset options depend on FROM chain and mode
   const assetOptions =
     value.from === "assethub"
       ? [
@@ -66,9 +71,6 @@ export function SendForm(props: {
           { key: "USDT_HYDRA", label: "USDT (Hydra)" },
         ];
 
-  // To options depend on asset:
-  // - DOT supports AssetHub <-> Relay
-  // - Stablecoins support AssetHub <-> Hydra
   const toOptions =
     value.asset === "DOT"
       ? value.from === "assethub"
@@ -96,6 +98,12 @@ export function SendForm(props: {
         </div>
       )}
 
+      {relayNote && (
+        <div style={{ marginTop: 10, border: "1px solid #cfe6ff", background: "#eef6ff", padding: 12, borderRadius: 10, fontSize: 13 }}>
+          <b>Relay bootstrap:</b> {relayNote}
+        </div>
+      )}
+
       <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
         <label>
           <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>From</div>
@@ -104,13 +112,11 @@ export function SendForm(props: {
             onChange={(e) => {
               const nextFrom = e.target.value as any;
 
-              // keep asset valid when switching chain
               let nextAsset = value.asset;
               if (nextFrom === "relay") nextAsset = "DOT";
               if (nextFrom === "hydradx" && nextAsset === "DOT") nextAsset = "USDC_HYDRA";
               if (nextFrom === "assethub" && nextAsset === "USDC_HYDRA") nextAsset = "USDC_AH";
 
-              // auto-adjust destination
               let nextTo = value.to;
               if (nextAsset === "DOT") {
                 nextTo = nextFrom === "relay" ? "assethub" : "relay";
@@ -195,7 +201,7 @@ export function SendForm(props: {
       )}
 
       <div style={{ marginTop: 14, border: "1px solid #eaeaea", background: "#fafafa", padding: 12, borderRadius: 10 }}>
-        <strong>Fees (estimate)</strong>
+        <strong>Fees</strong>
 
         <div style={{ marginTop: 8, display: "grid", gap: 4 }}>
           <div>Network fee (est): {feeQuote.networkFeeDotEst}</div>
@@ -213,19 +219,18 @@ export function SendForm(props: {
           </ul>
         )}
 
-        <div style={{ marginTop: 12 }}>
-          <label style={{ display: "flex", gap: 10, alignItems: "center" }}>
-            <input type="checkbox" checked={serviceFeeEnabled} onChange={(e) => onToggleServiceFee(e.target.checked)} />
-            <span>Include service fee (default on)</span>
-          </label>
+        {!hideServiceFee && (
+          <div style={{ marginTop: 12 }}>
+            <label style={{ display: "flex", gap: 10, alignItems: "center" }}>
+              <input type="checkbox" checked={serviceFeeEnabled} onChange={(e) => onToggleServiceFee(e.target.checked)} />
+              <span>Include service fee (default on)</span>
+            </label>
 
-          <div style={{ marginTop: 6, fontSize: 13, opacity: 0.7 }}>
-            Service fees help fund development and maintenance of this non-custodial dApp. You can disable them if you prefer.
+            <div style={{ marginTop: 6, fontSize: 13, opacity: 0.7 }}>
+              <b>Note:</b> service fee is currently <b>informational</b> (not yet collected on-chain).
+            </div>
           </div>
-          <div style={{ marginTop: 6, fontSize: 13, opacity: 0.7 }}>
-            <b>Note:</b> service fee is currently <b>informational</b> (not yet collected on-chain).
-          </div>
-        </div>
+        )}
 
         <div style={{ marginTop: 12, fontSize: 13, opacity: 0.7 }}>{safetyMsg}</div>
       </div>
