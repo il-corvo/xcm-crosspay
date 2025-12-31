@@ -27,6 +27,8 @@ export function SendForm(props: {
 
   warning?: string;
   modeLabel: string;
+
+  advancedDotEnabled: boolean;
 }) {
   const {
     value,
@@ -43,6 +45,7 @@ export function SendForm(props: {
     submitHelp,
     warning,
     modeLabel,
+    advancedDotEnabled,
   } = props;
 
   const errors = validateRequest(value);
@@ -53,15 +56,17 @@ export function SendForm(props: {
       : [{ key: "assethub", name: "Polkadot Asset Hub" }];
 
   const assetOptions =
-    value.from === "assethub"
-      ? [
-          { key: "USDC_AH", label: "USDC (Asset Hub)" },
-          { key: "USDT_AH", label: "USDT (Asset Hub)" },
-        ]
-      : [
-          { key: "USDC_HYDRA", label: "USDC (Hydra)" },
-          { key: "USDT_HYDRA", label: "USDT (Hydra)" },
-        ];
+  value.from === "assethub"
+    ? [
+        ...(advancedDotEnabled ? [{ key: "DOT", label: "DOT (Advanced execute)" }] : []),
+        { key: "USDC_AH", label: "USDC (Asset Hub)" },
+        { key: "USDT_AH", label: "USDT (Asset Hub)" },
+      ]
+    : [
+        { key: "USDC_HYDRA", label: "USDC (Hydra)" },
+        { key: "USDT_HYDRA", label: "USDT (Hydra)" },
+      ];
+
 
   return (
     <div
