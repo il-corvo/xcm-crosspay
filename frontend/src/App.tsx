@@ -49,6 +49,7 @@ function parseDecimalToInt(amount: string, decimals: number): bigint {
   const whole = BigInt(wholeStr || "0");
   const fracInt = BigInt(frac || "0");
   const base = 10n ** BigInt(decimals);
+
   return whole * base + fracInt;
 }
 
@@ -88,7 +89,9 @@ async function connectApiWithFallback(
     }
   }
 
-  throw new Error(`All RPC endpoints failed. Last error: ${lastErr?.message ?? String(lastErr)}`);
+  throw new Error(
+    `All RPC endpoints failed. Last error: ${lastErr?.message ?? String(lastErr)}`
+  );
 }
 
 function logFinalizedEvents(
@@ -105,7 +108,11 @@ function logFinalizedEvents(
 
       if (sec === "polkadotXcm" && met === "Attempted") {
         let payload = "";
-        try { payload = JSON.stringify(event.toHuman(), null, 2); } catch { payload = event.toString(); }
+        try {
+          payload = JSON.stringify(event.toHuman(), null, 2);
+        } catch {
+          payload = event.toString();
+        }
         lines.push(`*** polkadotXcm.Attempted ***\n${payload}`);
       } else if (
         sec === "polkadotXcm" ||
@@ -117,13 +124,23 @@ function logFinalizedEvents(
         sec === "system"
       ) {
         let payload = "";
-        try { payload = JSON.stringify(event.toHuman()); } catch { payload = event.toString(); }
+        try {
+          payload = JSON.stringify(event.toHuman());
+        } catch {
+          payload = event.toString();
+        }
         lines.push(`${sec}.${met}: ${payload}`);
       }
     }
 
     if (lines.length) {
-      setLog((s) => s + `\n--- EVENTS (finalized) ---\n${lines.join("\n")}\n--- END EVENTS ---\n`);
+      setLog(
+        (s) =>
+          s +
+          `\n--- EVENTS (finalized) ---\n` +
+          lines.join("\n") +
+          `\n--- END EVENTS ---\n`
+      );
     }
   } catch {}
 }
@@ -138,7 +155,6 @@ export default function App() {
     amount: "",
   });
 
-  // Advanced DOT execute toggle (OFF by default)
   const [dotExecuteEnabled, setDotExecuteEnabled] = useState(false);
 
   const [serviceFeeEnabled, setServiceFeeEnabled] = useState(true);
@@ -169,13 +185,16 @@ export default function App() {
   }, [serviceFeeEnabled]);
 
   const amountNum = Number(guardedReq.amount || "0");
-  const minOk = Number.isFinite(amountNum) && amountNum >= MIN_STABLE;
 
   const balNative = Number(wallet.balanceDot ?? "NaN");
   const edNative = Number(wallet.edDot ?? "NaN");
   const feeTotal = Number(feeQuote.totalFeeDot);
 
-  const hasWalletNums = Number.isFinite(balNative) && Number.isFinite(edNative) && Number.isFinite(feeTotal);
+  const hasWalletNums =
+    Number.isFinite(balNative) &&
+    Number.isFinite(edNative) &&
+    Number.isFinite(feeTotal);
+
   const remaining = hasWalletNums ? balNative - feeTotal : NaN;
   const safe = hasWalletNums ? remaining >= edNative : false;
 
@@ -185,14 +204,29 @@ export default function App() {
     ? `OK: remaining native ≈ ${remaining.toFixed(6)} (ED ${edNative}).`
     : `Too much: would leave ≈ ${remaining.toFixed(6)} (below ED ${edNative}).`;
 
-  const canPreview = errors.length === 0 && safe && minOk;
+  const minOkStable = Number.isFinite(amountNum) && amountNum >= MIN_STABLE;
+
+  const dotExecAmountOk =
+    Number.isFinite(amountNum) &&
+    amountNum >= DOT_EXEC_MIN &&
+    amountNum <= DOT_EXEC_MAX;
+
+  const canPreview = errors.length === 0 && safe && minOkStable;
 
   const modeLabel =
     guardedReq.from === "assethub"
       ? "Asset Hub → HydraDX (reserve transfer)"
       : "HydraDX → Asset Hub (reserve transfer)";
 
-  // Stable routes
+  const warning =
+    dotExecuteEnabled
+      ? `Advanced DOT execute enabled. Range: ${DOT_EXEC_MIN.toFixed(2)}–${DOT_EXEC_MAX.toFixed(
+          2
+        )} DOT. Use with caution.`
+      : !minOkStable
+      ? `Minimum stablecoin amount is ${MIN_STABLE.toFixed(2)}.`
+      : undefined;
+
   const supportsAhToHydra =
     guardedReq.from === "assethub" &&
     guardedReq.to === "hydradx" &&
@@ -205,40 +239,26 @@ export default function App() {
     (guardedReq.asset === "USDC_HYDRA" || guardedReq.asset === "USDT_HYDRA") &&
     selectedAddress.length > 0;
 
-  // Advanced DOT execute route (separate, only AH -> Hydra)
-  const dotExecAmountOk =
-    Number.isFinite(amountNum) &&
-    amountNum >= DOT_EXEC_MIN &&
-    amountNum <= DOT_EXEC_MAX;
-
   const supportsDotExecute =
     dotExecuteEnabled &&
     guardedReq.from === "assethub" &&
     guardedReq.to === "hydradx" &&
+    guardedReq.asset === "DOT" &&
     selectedAddress.length > 0 &&
     dotExecAmountOk;
 
   const canSubmitReal =
-    !submitting && (
-      (canPreview && (supportsAhToHydra || supportsHydraToAh)) ||
-      supportsDotExecute
-    );
+    !submitting &&
+    (supportsDotExecute || (canPreview && (supportsAhToHydra || supportsHydraToAh)));
 
   const submitHelp =
     supportsDotExecute
-      ? "Real submit: DOT (advanced) via polkadotXcm.execute (experimental)."
+      ? "Real submit: DOT (advanced) via polkadotXcm.execute."
       : supportsAhToHydra
       ? "Real submit enabled: stablecoin Asset Hub → HydraDX."
       : supportsHydraToAh
       ? "Real submit enabled: stablecoin HydraDX → Asset Hub."
       : "Unsupported route/asset (safe-mode).";
-
-  const warning =
-    dotExecuteEnabled
-      ? `Advanced DOT execute enabled. Range: ${DOT_EXEC_MIN.toFixed(2)}–${DOT_EXEC_MAX.toFixed(2)} DOT. Use with caution.`
-      : !minOk
-      ? `Minimum stablecoin amount is ${MIN_STABLE.toFixed(2)}.`
-      : undefined;
 
   const onDryRun = () => setDryRun(buildXcmDryRun(guardedReq, feeQuote));
 
@@ -267,7 +287,6 @@ export default function App() {
     const md: any = await api.query.assets.metadata(assetId);
     const decimals: number = Number(md.decimals?.toString?.() ?? "6");
     const symbol: string = String(md.symbol?.toHuman?.() ?? "ASSET");
-
     setSubmitLog((s) => s + `Asset: ${symbol} (id ${assetId}, decimals ${decimals})\n`);
 
     const amountInt = parseDecimalToInt(guardedReq.amount, decimals);
@@ -276,7 +295,9 @@ export default function App() {
       V3: [
         {
           fun: { Fungible: amountInt.toString() },
-          id: { Concrete: { parents: 0, interior: { X2: [{ PalletInstance: 50 }, { GeneralIndex: String(assetId) }] } } },
+          id: {
+            Concrete: { parents: 0, interior: { X2: [{ PalletInstance: 50 }, { GeneralIndex: String(assetId) }] } },
+          },
         },
       ],
     };
@@ -303,7 +324,7 @@ export default function App() {
     const symbol: string = String(human?.symbol ?? "USDT");
 
     setSubmitLog((s) => s + `Asset (Hydra): ${symbol} (assetId ${hydraAssetId}, decimals ${decimals})\n`);
-    setSubmitLog((s) => s + `Reserve location: parents=1, X3[Parachain 1000, PalletInstance 50, GeneralIndex ${generalIndex}]\n`);
+    setSubmitLog((s) => s + `Reserve: parents=1, X3[Parachain 1000, PalletInstance 50, GeneralIndex ${generalIndex}]\n`);
 
     const amountInt = parseDecimalToInt(guardedReq.amount, decimals);
 
@@ -315,11 +336,7 @@ export default function App() {
             Concrete: {
               parents: 1,
               interior: {
-                X3: [
-                  { Parachain: ASSET_HUB_PARA },
-                  { PalletInstance: 50 },
-                  { GeneralIndex: generalIndex },
-                ],
+                X3: [{ Parachain: ASSET_HUB_PARA }, { PalletInstance: 50 }, { GeneralIndex: generalIndex }],
               },
             },
           },
@@ -331,18 +348,15 @@ export default function App() {
   }
 
   async function makeTxDotExecute(api: ApiPromise) {
-    // execute is only on Asset Hub
     const injector = await web3FromAddress(selectedAddress);
     api.setSigner(injector.signer);
 
     const amountPlanck = parseDecimalToInt(guardedReq.amount, DOT_DECIMALS);
 
     // fee prudente: 1% con min 0.01 DOT, max 0.02 DOT
-    const feeMin = 1n * (DOT_BASE / 100n); // 0.01 DOT
-    const feeMax = 2n * (DOT_BASE / 100n); // 0.02 DOT
-    const feePct = amountPlanck / 100n; // 1%
-
-    let feePlanck = feePct;
+    const feeMin = 1n * (DOT_BASE / 100n);
+    const feeMax = 2n * (DOT_BASE / 100n);
+    let feePlanck = amountPlanck / 100n;
     if (feePlanck < feeMin) feePlanck = feeMin;
     if (feePlanck > feeMax) feePlanck = feeMax;
     if (feePlanck >= amountPlanck) feePlanck = amountPlanck / 2n;
@@ -350,8 +364,6 @@ export default function App() {
     const HYDRADX_PARA = 2034;
     const beneficiaryId = decodeAddress(selectedAddress);
 
-    // Message template derived from your successful Subscan execute example:
-    // V4: WithdrawAsset(DOT parents:1 Here), BuyExecution(fees DOT), DepositReserveAsset(dest para 2034, xcm=[BuyExecution, DepositAsset])
     const message = {
       V4: [
         {
@@ -407,12 +419,35 @@ export default function App() {
     return api.tx.polkadotXcm.execute(message as any, maxWeight as any);
   }
 
+  function handleToggleDotExecute(enabled: boolean) {
+    setDotExecuteEnabled(enabled);
+
+    // Auto-switch UI to the only supported advanced route
+    if (enabled) {
+      setReq((prev) => ({
+        ...prev,
+        from: "assethub",
+        to: "hydradx",
+        asset: "DOT",
+      }));
+    } else {
+      setReq((prev) => ({
+        ...prev,
+        from: "assethub",
+        to: "hydradx",
+        asset: "USDC_AH",
+      }));
+    }
+
+    setDryRun(undefined);
+    setSubmitLog("");
+  }
+
   async function onSubmitReal() {
     setSubmitLog("");
     setSubmitting(true);
 
     try {
-      // Advanced DOT execute has its own guardrails
       if (supportsDotExecute) {
         const { api } = await connectApiWithFallback(ASSET_HUB_RPCS, setSubmitLog, "rpc_assethub_last_ok");
         const tx = await makeTxDotExecute(api);
@@ -539,9 +574,11 @@ export default function App() {
           <input
             type="checkbox"
             checked={dotExecuteEnabled}
-            onChange={(e) => setDotExecuteEnabled(e.target.checked)}
+            onChange={(e) => handleToggleDotExecute(e.target.checked)}
           />
-          <span><b>Advanced:</b> enable DOT Asset Hub → HydraDX via <code>polkadotXcm.execute</code></span>
+          <span>
+            <b>Advanced:</b> enable DOT Asset Hub → HydraDX via <code>polkadotXcm.execute</code>
+          </span>
         </label>
         <div style={{ marginTop: 6, fontSize: 13, opacity: 0.75 }}>
           Experimental feature. Uses an explicit XCM message (execute). Range: {DOT_EXEC_MIN.toFixed(2)}–{DOT_EXEC_MAX.toFixed(2)} DOT.
@@ -567,6 +604,7 @@ export default function App() {
         submitHelp={submitHelp}
         warning={warning}
         modeLabel={modeLabel}
+        advancedDotEnabled={dotExecuteEnabled}
       />
 
       {submitLog && (
