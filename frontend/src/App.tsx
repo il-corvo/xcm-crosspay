@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import "./App.css";
 
+import { guardRoute } from "../../xcm-engine/guard";
+
 import { WalletPanel } from "./WalletPanel";
 import type { WalletChainData } from "./WalletPanel";
 import { SendForm } from "./SendForm";
@@ -15,14 +17,7 @@ import { ApiPromise, WsProvider } from "@polkadot/api";
 import { web3FromAddress } from "@polkadot/extension-dapp";
 import { decodeAddress } from "@polkadot/util-crypto";
 
-const MIN_STABLE = 0.10;
-const MIN_DOT_TELEPORT = 0.05;
-
 const DOT_DECIMALS = 10;
-
-// Relay bootstrap buffers (prudent, not magic)
-const RELAY_FEE_BUFFER = 10_000_000n;   // 0.01 DOT
-const RELAY_SAFETY_BUFFER = 50_000_000n; // 0.05 DOT
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -50,7 +45,6 @@ function parseDecimalToInt(amount: string, decimals: number): bigint {
   const whole = BigInt(wholeStr || "0");
   const fracInt = BigInt(frac || "0");
   const base = 10n ** BigInt(decimals);
-
   return whole * base + fracInt;
 }
 
@@ -145,7 +139,11 @@ function logFinalizedEvents(
     }
 
     if (lines.length) {
-      setLog((s) => s + `\n--- EVENTS (finalized) ---\n${lines.join("\n")}\n--- END EVENTS ---\n`);
+      setLog(
+        (s) =>
+          s +
+          `\n--- EVENTS (finalized) ---\n${lines.join("\n")}\n--- END EVENTS ---\n`
+      );
     }
   } catch {}
 }
@@ -180,17 +178,20 @@ export default function App() {
 
   const guardedReq = useMemo<TransferRequest>(() => {
     if (req.from !== req.to) return req;
-    const nextTo: TransferRequest["to"] = req.from === "assethub" ? "hydradx" : "assethub";
+    const nextTo: TransferRequest["to"] =
+      req.from === "assethub" ? "hydradx" : "assethub";
     return { ...req, to: nextTo };
   }, [req]);
 
   const errors = useMemo(() => validateRequest(guardedReq), [guardedReq]);
 
-  const isDot = guardedReq.asset === "DOT";
   const isRelayMode = guardedReq.from === "relay" || guardedReq.to === "relay";
-  const isAhToRelayDot = guardedReq.from === "assethub" && guardedReq.to === "relay" && guardedReq.asset === "DOT";
+  const isAhToRelayDot =
+    guardedReq.from === "assethub" &&
+    guardedReq.to === "relay" &&
+    guardedReq.asset === "DOT";
 
-  // Fee quote: relay mode is on-chain, no service fee / no fake estimate
+  // Fee quote: relay mode is on-chain, hide service fee and fake estimates
   const networkFeeDotEst = 0.012;
   const feeQuote = useMemo<FeeQuote>(() => {
     if (isRelayMode) {
@@ -210,80 +211,53 @@ export default function App() {
     return q;
   }, [isRelayMode, serviceFeeEnabled]);
 
-  const amountNum = Number(guardedReq.amount || "0");
-  const minOkBase = isDot
-    ? Number.isFinite(amountNum) && amountNum >= MIN_DOT_TELEPORT
-    : Number.isFinite(amountNum) && amountNum >= MIN_STABLE;
+  // ---- AssetKey -> Guard Asset mapping ----
+  const guardAsset =
+    guardedReq.asset === "USDC_AH" || guardedReq.asset === "USDC_HYDRA"
+      ? "USDC"
+      : guardedReq.asset === "USDT_AH" || guardedReq.asset === "USDT_HYDRA"
+      ? "USDT"
+      : "DOT";
 
-  // Relay bootstrap guard (dynamic): only applies to AH->Relay DOT
-  const amountPlanck = isDot ? parseDecimalToInt(guardedReq.amount, DOT_DECIMALS) : 0n;
+  const guard = guardRoute({
+    from: guardedReq.from as any,
+    to: guardedReq.to as any,
+    asset: guardAsset as any,
+    amount: Number(guardedReq.amount || "0"),
 
-  const relayBootstrapNeeded = useMemo(() => {
-    if (!isAhToRelayDot) return null;
-    if (!relayProbe) return null;
-
-    // If relayFree >= ED, no hard requirement.
-    if (relayProbe.free >= relayProbe.ed) return { required: 0n, reason: "relay_above_ed" as const };
-
-    // Need at least ED + buffers on relay after execution costs.
-    const deficit = relayProbe.ed - relayProbe.free;
-    const required = deficit + RELAY_FEE_BUFFER + RELAY_SAFETY_BUFFER;
-    return { required, reason: "relay_below_ed" as const };
-  }, [isAhToRelayDot, relayProbe]);
-
-  const relayBootstrapOk = useMemo(() => {
-    if (!isAhToRelayDot) return true;
-    if (!relayBootstrapNeeded) return false; // not ready -> be conservative
-    if (relayBootstrapNeeded.required === 0n) return true;
-    return amountPlanck >= relayBootstrapNeeded.required;
-  }, [isAhToRelayDot, relayBootstrapNeeded, amountPlanck]);
-
-  const minOk = minOkBase && relayBootstrapOk;
+    // Relay bootstrap inputs (dynamic)
+    relayFreeDot: relayProbe ? Number(fmtPlanckToDot(relayProbe.free)) : undefined,
+    relayEDDot: relayProbe ? Number(fmtPlanckToDot(relayProbe.ed)) : undefined,
+  });
 
   // Safety message (walletPanel is AH/Hydra only; relay is special)
   const safetyMsg = isRelayMode
-    ? "Relay note: DOT may not appear as a transferable balance for small teleports. Execution can consume a significant share. Consider bootstrapping Relay with a larger first transfer."
-    : !Number.isFinite(Number(wallet.balanceDot ?? "NaN")) || !Number.isFinite(Number(wallet.edDot ?? "NaN"))
+    ? "Relay note: fees are on-chain. If your Relay account is below ED, small teleports may result in near-zero net received."
+    : !Number.isFinite(Number(wallet.balanceDot ?? "NaN")) ||
+      !Number.isFinite(Number(wallet.edDot ?? "NaN"))
     ? "Wallet data not ready yet."
     : `OK: keep a native buffer above ED (${wallet.edDot}).`;
 
-  // Optional relay note for UI
+  // Relay note for UI (shows free/ED and minRequired from guard, if any)
   const relayNote = useMemo(() => {
     if (!isAhToRelayDot) return undefined;
 
-    if (!relayProbe) {
-      return "Reading Relay balance/ED…";
-    }
+    if (!relayProbe) return "Reading Relay balance/ED…";
 
     const free = fmtPlanckToDot(relayProbe.free);
     const ed = fmtPlanckToDot(relayProbe.ed);
 
-    if (relayProbe.free >= relayProbe.ed) {
-      return `Relay free ≈ ${free} DOT (ED ≈ ${ed}). Account is above ED. Small teleports are less risky.`;
+    if (typeof guard.minRequired === "number") {
+      return `Relay free ≈ ${free} DOT (ED ≈ ${ed}). Relay is below ED: minimum required now ≈ ${guard.minRequired.toFixed(
+        4
+      )} DOT.`;
     }
 
-    const reqMin = relayBootstrapNeeded?.required ?? 0n;
-    const reqMinDot = fmtPlanckToDot(reqMin);
+    return `Relay free ≈ ${free} DOT (ED ≈ ${ed}). Account is above ED.`;
+  }, [isAhToRelayDot, relayProbe, guard.minRequired]);
 
-    return `Relay free ≈ ${free} DOT (ED ≈ ${ed}). Relay is below ED: block small teleports. Minimum required now ≈ ${reqMinDot} DOT.`;
-  }, [isAhToRelayDot, relayProbe, relayBootstrapNeeded]);
-
-  const warning = useMemo(() => {
-    if (isRelayMode) {
-      return "Relay mode: fees are on-chain. For first-time Relay bootstrap, send enough DOT to stay above ED after execution.";
-    }
-    if (!minOkBase) {
-      return isDot
-        ? `Minimum DOT amount is ${MIN_DOT_TELEPORT.toFixed(2)}.`
-        : `Minimum stablecoin amount is ${MIN_STABLE.toFixed(2)}.`;
-    }
-    if (!relayBootstrapOk && relayBootstrapNeeded?.required) {
-      return `Relay bootstrap required: send at least ${fmtPlanckToDot(relayBootstrapNeeded.required)} DOT (Relay is currently below ED).`;
-    }
-    return undefined;
-  }, [isRelayMode, minOkBase, isDot, relayBootstrapOk, relayBootstrapNeeded]);
-
-  const canPreview = errors.length === 0 && minOk;
+  const warning = !guard.ok ? guard.reason : undefined;
+  const canPreview = errors.length === 0 && guard.ok;
 
   // Supported routes
   const supportsAhToHydraStable =
@@ -312,15 +286,23 @@ export default function App() {
 
   const canSubmitReal =
     !submitting &&
-    canPreview &&
-    (supportsAhToHydraStable || supportsHydraToAhStable || supportsAhToRelayDot || supportsRelayToAhDot);
+    errors.length === 0 &&
+    guard.ok &&
+    (supportsAhToHydraStable ||
+      supportsHydraToAhStable ||
+      supportsAhToRelayDot ||
+      supportsRelayToAhDot);
 
   const modeLabel =
-    supportsAhToRelayDot ? "Asset Hub → Relay (DOT teleport)" :
-    supportsRelayToAhDot ? "Relay → Asset Hub (DOT teleport)" :
-    guardedReq.from === "assethub" ? "Asset Hub → HydraDX (reserve transfer)" :
-    guardedReq.from === "hydradx" ? "HydraDX → Asset Hub (reserve transfer)" :
-    "Mode";
+    supportsAhToRelayDot
+      ? "Asset Hub → Relay (DOT teleport)"
+      : supportsRelayToAhDot
+      ? "Relay → Asset Hub (DOT teleport)"
+      : guardedReq.from === "assethub"
+      ? "Asset Hub → HydraDX (reserve transfer)"
+      : guardedReq.from === "hydradx"
+      ? "HydraDX → Asset Hub (reserve transfer)"
+      : "Mode";
 
   const submitHelp =
     supportsAhToHydraStable
@@ -346,12 +328,9 @@ export default function App() {
 
   const HYDRA_RPCS = ["wss://rpc.hydradx.cloud", "wss://hydradx-rpc.dwellir.com"];
 
-  const RELAY_RPCS = [
-    "wss://rpc.polkadot.io",
-    "wss://polkadot-rpc.dwellir.com",
-  ];
+  const RELAY_RPCS = ["wss://rpc.polkadot.io", "wss://polkadot-rpc.dwellir.com"];
 
-  // Relay probe: read relay free + ED when needed (AH->Relay DOT, or from relay)
+  // Relay probe: read relay free + ED when needed
   useEffect(() => {
     let cancelled = false;
     let api: ApiPromise | null = null;
@@ -363,10 +342,15 @@ export default function App() {
       if (!needRelayProbe) return;
 
       try {
-        const { api: relayApi } = await connectApiWithFallback(RELAY_RPCS, () => {}, "rpc_relay_last_ok");
+        const { api: relayApi } = await connectApiWithFallback(
+          RELAY_RPCS,
+          () => {},
+          "rpc_relay_last_ok"
+        );
         api = relayApi;
 
-        const edStr = api.consts.balances?.existentialDeposit?.toString?.() ?? "0";
+        const edStr =
+          api.consts.balances?.existentialDeposit?.toString?.() ?? "0";
         const ed = BigInt(edStr);
 
         const info: any = await api.query.system.account(selectedAddress);
@@ -384,12 +368,19 @@ export default function App() {
         if (cancelled) return;
         setRelayProbe(null);
       } finally {
-        try { api?.disconnect(); } catch {}
+        try {
+          api?.disconnect();
+        } catch {}
       }
     }
 
     run();
-    return () => { cancelled = true; try { api?.disconnect(); } catch {} };
+    return () => {
+      cancelled = true;
+      try {
+        api?.disconnect();
+      } catch {}
+    };
   }, [selectedAddress, isAhToRelayDot, guardedReq.from]);
 
   async function makeTxAhToHydra(api: ApiPromise) {
@@ -397,10 +388,14 @@ export default function App() {
     api.setSigner(injector.signer);
 
     const HYDRADX_PARA = 2034;
-    const dest = { V3: { parents: 1, interior: { X1: { Parachain: HYDRADX_PARA } } } };
+    const dest = {
+      V3: { parents: 1, interior: { X1: { Parachain: HYDRADX_PARA } } },
+    };
 
     const id = decodeAddress(selectedAddress);
-    const beneficiary = { V3: { parents: 0, interior: { X1: { AccountId32: { network: null, id } } } } };
+    const beneficiary = {
+      V3: { parents: 0, interior: { X1: { AccountId32: { network: null, id } } } },
+    };
 
     const assetId = guardedReq.asset === "USDC_AH" ? 1337 : 1984;
     const md: any = await api.query.assets.metadata(assetId);
@@ -414,12 +409,23 @@ export default function App() {
       V3: [
         {
           fun: { Fungible: amountInt.toString() },
-          id: { Concrete: { parents: 0, interior: { X2: [{ PalletInstance: 50 }, { GeneralIndex: String(assetId) }] } } },
+          id: {
+            Concrete: {
+              parents: 0,
+              interior: { X2: [{ PalletInstance: 50 }, { GeneralIndex: String(assetId) }] },
+            },
+          },
         },
       ],
     };
 
-    return api.tx.polkadotXcm.limitedReserveTransferAssets(dest as any, beneficiary as any, assets as any, 0, { Unlimited: null } as any);
+    return api.tx.polkadotXcm.limitedReserveTransferAssets(
+      dest as any,
+      beneficiary as any,
+      assets as any,
+      0,
+      { Unlimited: null } as any
+    );
   }
 
   async function makeTxHydraToAh(api: ApiPromise) {
@@ -427,10 +433,14 @@ export default function App() {
     api.setSigner(injector.signer);
 
     const ASSET_HUB_PARA = 1000;
-    const dest = { V3: { parents: 1, interior: { X1: { Parachain: ASSET_HUB_PARA } } } };
+    const dest = {
+      V3: { parents: 1, interior: { X1: { Parachain: ASSET_HUB_PARA } } },
+    };
 
     const id = decodeAddress(selectedAddress);
-    const beneficiary = { V3: { parents: 0, interior: { X1: { AccountId32: { network: null, id } } } } };
+    const beneficiary = {
+      V3: { parents: 0, interior: { X1: { AccountId32: { network: null, id } } } },
+    };
 
     const generalIndex = guardedReq.asset === "USDC_HYDRA" ? "1337" : "1984";
     const hydraAssetId = guardedReq.asset === "USDC_HYDRA" ? 22 : 10;
@@ -465,16 +475,20 @@ export default function App() {
       ],
     };
 
-    return api.tx.polkadotXcm.limitedReserveTransferAssets(dest as any, beneficiary as any, assets as any, 0, { Unlimited: null } as any);
+    return api.tx.polkadotXcm.limitedReserveTransferAssets(
+      dest as any,
+      beneficiary as any,
+      assets as any,
+      0,
+      { Unlimited: null } as any
+    );
   }
 
   async function makeTxAhToRelayTeleport(api: ApiPromise) {
     const injector = await web3FromAddress(selectedAddress);
     api.setSigner(injector.signer);
 
-    // From inspected tx:
-    // dest V4: {parents:1, interior:Here} => Relay
-    const dest = { V4: { parents: "1", interior: "Here" } };
+    const dest = { V4: { parents: "1", interior: "Here" } }; // Relay
 
     const id = decodeAddress(selectedAddress);
     const beneficiary = {
@@ -495,7 +509,13 @@ export default function App() {
       ],
     };
 
-    return api.tx.polkadotXcm.limitedTeleportAssets(dest as any, beneficiary as any, assets as any, "0" as any, "Unlimited" as any);
+    return api.tx.polkadotXcm.limitedTeleportAssets(
+      dest as any,
+      beneficiary as any,
+      assets as any,
+      "0" as any,
+      "Unlimited" as any
+    );
   }
 
   async function makeTxRelayToAhTeleport(api: ApiPromise) {
@@ -514,18 +534,12 @@ export default function App() {
     }
 
     const dest = {
-      V4: {
-        parents: 0,
-        interior: { X1: [{ Parachain: 1000 }] }, // Asset Hub
-      },
+      V4: { parents: 0, interior: { X1: [{ Parachain: 1000 }] } }, // Asset Hub
     };
 
     const id = decodeAddress(selectedAddress);
     const beneficiary = {
-      V4: {
-        parents: 0,
-        interior: { X1: [{ AccountId32: { network: null, id } }] },
-      },
+      V4: { parents: 0, interior: { X1: [{ AccountId32: { network: null, id } }] } },
     };
 
     const amountInt = parseDecimalToInt(guardedReq.amount, DOT_DECIMALS);
@@ -543,9 +557,21 @@ export default function App() {
     const weightLimit = "Unlimited";
 
     if (pallet === "xcmPallet") {
-      return (api.tx as any).xcmPallet.limitedTeleportAssets(dest as any, beneficiary as any, assets as any, feeAssetItem, weightLimit as any);
+      return (api.tx as any).xcmPallet.limitedTeleportAssets(
+        dest as any,
+        beneficiary as any,
+        assets as any,
+        feeAssetItem,
+        weightLimit as any
+      );
     }
-    return (api.tx as any).polkadotXcm.limitedTeleportAssets(dest as any, beneficiary as any, assets as any, feeAssetItem, weightLimit as any);
+    return (api.tx as any).polkadotXcm.limitedTeleportAssets(
+      dest as any,
+      beneficiary as any,
+      assets as any,
+      feeAssetItem,
+      weightLimit as any
+    );
   }
 
   async function onSubmitReal() {
@@ -745,4 +771,5 @@ export default function App() {
     </div>
   );
 }
+
 
