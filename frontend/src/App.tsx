@@ -589,7 +589,6 @@ export default function App() {
       // DOT teleports
       if (guardedReq.asset === "DOT" && guardedReq.from === "assethub" && guardedReq.to === "relay") {
         const { api } = await connectApiWithFallback(ASSET_HUB_RPCS, setSubmitLog, "rpc_assethub_last_ok");
-        const tx = await makeTxAhToTeleportPara(api, 0); // relay is handled by dedicated dest in builder? use paraId 0 not valid
         // Use dedicated relay teleport: paraId "Here" (we reuse existing relay teleport via 0? no)
         // We'll just call the proven dest=Here relay template by passing paraId 0? Not correct.
         // Instead: use explicit relay builder:
