@@ -116,8 +116,8 @@ async function probeAssetHub(address: string, cfg: ProbeConfig): Promise<ChainBa
     const usdcId = cfg.assetHub.usdcAssetId;
     const usdtId = cfg.assetHub.usdtAssetId;
 
-    const usdcAcc: any = await api.query.assets.account(usdcId, address);
-    const usdtAcc: any = await api.query.assets.account(usdtId, address);
+const usdcOpt: any = await api.query.assets.account(usdcId, address);
+const usdtOpt: any = await api.query.assets.account(usdtId, address);
 
     // decimals for each asset
     const usdcMeta: any = await api.query.assets.metadata(usdcId);
@@ -125,8 +125,8 @@ async function probeAssetHub(address: string, cfg: ProbeConfig): Promise<ChainBa
     const usdcDec = Number(usdcMeta.decimals?.toString?.() ?? "6");
     const usdtDec = Number(usdtMeta.decimals?.toString?.() ?? "6");
 
-    const usdcBal = BigInt(usdcAcc.balance?.toString?.() ?? "0");
-    const usdtBal = BigInt(usdtAcc.balance?.toString?.() ?? "0");
+const usdcBal = usdcOpt?.isSome ? BigInt(usdcOpt.unwrap().balance.toString()) : 0n;
+const usdtBal = usdtOpt?.isSome ? BigInt(usdtOpt.unwrap().balance.toString()) : 0n;
 
     const snap: ChainBalanceSnapshot = {
       chain: "assethub",
