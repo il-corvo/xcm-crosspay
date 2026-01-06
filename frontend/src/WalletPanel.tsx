@@ -1,104 +1,73 @@
 import { useEffect, useMemo, useState } from "react";
 import { web3Accounts, web3Enable } from "@polkadot/extension-dapp";
-import { ApiPromise, WsProvider } from "@polkadot/api";
-import { decodeAddress } from "@polkadot/util-crypto";
 
-export type ChainKey = "assethub" | "hydradx";
+import type { ChainBalanceSnapshot } from "../../xcm-engine/balances";
 
-// Dwellir last on Asset Hub (observed unstable)
-const RPCS: Record<ChainKey, string[]> = {
-  assethub: [
-    "wss://polkadot-asset-hub-rpc.polkadot.io",
-    "wss://rpc-asset-hub-polkadot.luckyfriday.io",
-    "wss://polkadot-asset-hub-rpc.polkadot.io/ws",
-    "wss://asset-hub-polkadot-rpc.dwellir.com",
-    "wss://asset-hub-polkadot-rpc.dwellir.com/ws",
-  ],
-  hydradx: ["wss://rpc.hydradx.cloud", "wss://hydradx-rpc.dwellir.com"],
+export type WalletChainData = {
+  status: string;
 };
 
 type UiAccount = { address: string; name?: string };
 
-function fmtIntWithDecimals(v: bigint, decimals: number): string {
-  const base = 10n ** BigInt(decimals);
-  const whole = (v / base).toString();
-  const frac = (v % base).toString().padStart(decimals, "0").replace(/0+$/, "");
-  return frac ? `${whole}.${frac}` : whole;
+function fmt6(s?: string): string {
+  if (!s) return "-";
+  // s is already formatted to 6 decimals by the probe engine, keep it stable
+  return s;
 }
 
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error("RPC timeout")), ms);
-    p.then((v) => {
-      clearTimeout(t);
-      resolve(v);
-    }).catch((e) => {
-      clearTimeout(t);
-      reject(e);
-    });
-  });
+function statusBadge(ok: boolean, error?: string) {
+  if (ok) return { text: "OK", style: { color: "#0a7d2c" } };
+  if (error) return { text: "ERR", style: { color: "#b00020" } };
+  return { text: "…", style: { color: "#666" } };
 }
 
-export type WalletChainData = {
-  status: string;
-  balanceDot?: string; // native free for selected chain (DOT on AssetHub, HDX on Hydra)
-  edDot?: string;      // native ED for selected chain
-};
+function chainLabel(chain: string): string {
+  if (chain === "assethub") return "Asset Hub";
+  if (chain === "hydradx") return "HydraDX";
+  if (chain === "relay") return "Relay";
+  if (chain === "people") return "People";
+  return chain;
+}
 
 export function WalletPanel(props: {
-  chain: ChainKey;
-  onChainData?: (d: WalletChainData) => void;
-  onSelectedAddress?: (addr: string) => void;
+  snapshots: ChainBalanceSnapshot[];
+  lastUpdatedMs?: number;
+  onRefresh?: () => void;
+
+  onSelectedAddress: (addr: string) => void;
+  onChainData: (d: WalletChainData) => void;
 }) {
-  const { chain, onChainData, onSelectedAddress } = props;
+  const { snapshots, lastUpdatedMs, onRefresh, onSelectedAddress, onChainData } =
+    props;
 
   const [extEnabled, setExtEnabled] = useState(false);
   const [accounts, setAccounts] = useState<UiAccount[]>([]);
   const [selected, setSelected] = useState<string>("");
-
   const [status, setStatus] = useState<string>("Not connected");
-
-  // Native token info (DOT on Asset Hub, HDX on Hydra)
-  const [nativeSymbol, setNativeSymbol] = useState<string>("NATIVE");
-  const [nativeBal, setNativeBal] = useState<string>("-");
-  const [nativeEd, setNativeEd] = useState<string>("-");
-
-  // Stable balances (chain-aware)
-  const [usdcLabel, setUsdcLabel] = useState<string>("USDC");
-  const [usdcBal, setUsdcBal] = useState<string>("-");
-
-  const [usdtLabel, setUsdtLabel] = useState<string>("USDT");
-  const [usdtBal, setUsdtBal] = useState<string>("-");
 
   const selectedAccount = useMemo(
     () => accounts.find((a) => a.address === selected),
     [accounts, selected]
   );
 
-  const setStatusN = (s: string) => {
-    setStatus(s);
-    onChainData?.({ status: s });
-  };
-
-  // 1) Enable wallet + load accounts
   useEffect(() => {
     let cancelled = false;
 
     async function run() {
-      setStatusN("Connecting to wallet extension...");
+      setStatus("Connecting to wallet extension...");
       try {
         const exts = await web3Enable("XCM CrossPay (Alpha)");
         if (cancelled) return;
 
         if (!exts || exts.length === 0) {
           setExtEnabled(false);
-          setStatusN("No wallet extension authorized (or none installed).");
+          setStatus("No wallet extension authorized (or none installed).");
+          onChainData({ status: "No extension" });
           return;
         }
-
         setExtEnabled(true);
-        setStatusN("Loading accounts...");
 
+        setStatus("Loading accounts...");
         const accs = await web3Accounts();
         if (cancelled) return;
 
@@ -108,14 +77,14 @@ export function WalletPanel(props: {
         }));
 
         setAccounts(mapped);
-
         const first = mapped[0]?.address ?? "";
         setSelected(first);
-        if (first) onSelectedAddress?.(first);
-
-        setStatusN(mapped.length ? "Wallet ready" : "No accounts found");
+        onSelectedAddress(first);
+        setStatus(mapped.length ? "Wallet ready" : "No accounts found");
+        onChainData({ status: mapped.length ? "Wallet ready" : "No accounts" });
       } catch (e: any) {
-        setStatusN(`Wallet error: ${e?.message ?? String(e)}`);
+        setStatus(`Wallet error: ${e?.message ?? String(e)}`);
+        onChainData({ status: "Wallet error" });
       }
     }
 
@@ -123,198 +92,18 @@ export function WalletPanel(props: {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [onSelectedAddress, onChainData]);
 
-  // keep parent updated with selected address
+  // Whenever selected changes, notify parent (App.tsx) so it can refresh probes
   useEffect(() => {
-    if (selected) onSelectedAddress?.(selected);
+    if (selected) onSelectedAddress(selected);
   }, [selected, onSelectedAddress]);
 
-  // 2) Connect RPC + subscribe balances
-  useEffect(() => {
-    let api: ApiPromise | null = null;
-
-    let unsubNative: (() => void) | undefined;
-    let unsubUsdc: (() => void) | undefined;
-    let unsubUsdt: (() => void) | undefined;
-
-    let cancelled = false;
-
-    async function connectAndSubscribe() {
-      setNativeBal("-");
-      setNativeEd("-");
-      setUsdcBal("-");
-      setUsdtBal("-");
-
-      onChainData?.({ status: "Loading...", balanceDot: undefined, edDot: undefined });
-
-      if (!selected) return;
-
-      const rpcs = RPCS[chain];
-
-      try {
-        let connected = false;
-
-        for (const url of rpcs) {
-          try {
-            setStatusN(`Connecting to ${chain} RPC: ${url}`);
-            api = await withTimeout(
-              ApiPromise.create({ provider: new WsProvider(url) }),
-              8000
-            );
-            connected = true;
-            break;
-          } catch (e) {
-            console.warn("RPC failed:", url, e);
-          }
-        }
-
-        if (!connected || !api) {
-          setStatusN("All RPC endpoints failed.");
-          return;
-        }
-
-        if (cancelled) return;
-
-        const decNative = (api.registry.chainDecimals?.[0] ?? 10) as number;
-        const tokNative = (api.registry.chainTokens?.[0] ?? "NATIVE") as string;
-        setNativeSymbol(tokNative);
-
-        setStatusN("Connected. Reading balances...");
-
-        // Native ED
-        const edConst = api.consts.balances?.existentialDeposit?.toString?.();
-        if (edConst) {
-          const edInt = BigInt(edConst);
-          const edFmt = fmtIntWithDecimals(edInt, decNative);
-          setNativeEd(edFmt);
-          onChainData?.({ status: "Connected. Reading balances...", edDot: edFmt });
-        }
-
-        // Native subscribe
-        unsubNative = (await api.query.system.account(selected, (info: any) => {
-          const free = BigInt(info.data.free.toString());
-          const balFmt = fmtIntWithDecimals(free, decNative);
-          setNativeBal(balFmt);
-          onChainData?.({ status: "Live balance (read-only)", balanceDot: balFmt });
-        })) as unknown as () => void;
-
-        if (chain === "assethub") {
-          // Asset Hub: pallet-assets
-          const USDC_ID_AH = 1337;
-          const USDT_ID_AH = 1984;
-
-          // USDC
-          try {
-            const md: any = await api.query.assets.metadata(USDC_ID_AH);
-            const dec = Number(md.decimals?.toString?.() ?? "6");
-            const symHuman = md.symbol?.toHuman?.();
-            const sym = typeof symHuman === "string" ? symHuman : "USDC";
-            setUsdcLabel(`${sym} (Asset Hub)`);
-
-            unsubUsdc = (await api.query.assets.account(USDC_ID_AH, selected, (accOpt: any) => {
-              const h = accOpt.toHuman();
-              if (h === null) {
-                setUsdcBal("0");
-                return;
-              }
-              const bal = BigInt(accOpt.unwrap().balance.toString());
-              setUsdcBal(fmtIntWithDecimals(bal, dec));
-            })) as unknown as () => void;
-          } catch (e) {
-            console.warn("USDC subscribe failed:", e);
-            setUsdcLabel("USDC (Asset Hub)");
-            setUsdcBal("-");
-          }
-
-          // USDT
-          try {
-            const md: any = await api.query.assets.metadata(USDT_ID_AH);
-            const dec = Number(md.decimals?.toString?.() ?? "6");
-            const symHuman = md.symbol?.toHuman?.();
-            const sym = typeof symHuman === "string" ? symHuman : "USDT";
-            setUsdtLabel(`${sym} (Asset Hub)`);
-
-            unsubUsdt = (await api.query.assets.account(USDT_ID_AH, selected, (accOpt: any) => {
-              const h = accOpt.toHuman();
-              if (h === null) {
-                setUsdtBal("0");
-                return;
-              }
-              const bal = BigInt(accOpt.unwrap().balance.toString());
-              setUsdtBal(fmtIntWithDecimals(bal, dec));
-            })) as unknown as () => void;
-          } catch (e) {
-            console.warn("USDT subscribe failed:", e);
-            setUsdtLabel("USDT (Asset Hub)");
-            setUsdtBal("-");
-          }
-        } else {
-          // Hydra/Hydration: ORML tokens + assetRegistry
-          const USDC_ID_HYDRA = 22;
-          const USDT_ID_HYDRA = 10;
-          const who = decodeAddress(selected);
-
-          // USDC
-          try {
-            const a: any = await api.query.assetRegistry.assets(USDC_ID_HYDRA);
-            const human = a.toHuman() as any;
-            const dec = Number(human?.decimals ?? "6");
-            const sym = String(human?.symbol ?? "USDC");
-            setUsdcLabel(`${sym} (Hydra)`);
-
-            unsubUsdc = (await api.query.tokens.accounts(who, USDC_ID_HYDRA, (acc: any) => {
-              const free = BigInt(acc.free.toString());
-              setUsdcBal(fmtIntWithDecimals(free, dec));
-            })) as unknown as () => void;
-          } catch (e) {
-            console.warn("Hydra USDC subscribe failed:", e);
-            setUsdcLabel("USDC (Hydra)");
-            setUsdcBal("-");
-          }
-
-          // USDT
-          try {
-            const a: any = await api.query.assetRegistry.assets(USDT_ID_HYDRA);
-            const human = a.toHuman() as any;
-            const dec = Number(human?.decimals ?? "6");
-            const sym = String(human?.symbol ?? "USDT");
-            setUsdtLabel(`${sym} (Hydra)`);
-
-            unsubUsdt = (await api.query.tokens.accounts(who, USDT_ID_HYDRA, (acc: any) => {
-              const free = BigInt(acc.free.toString());
-              setUsdtBal(fmtIntWithDecimals(free, dec));
-            })) as unknown as () => void;
-          } catch (e) {
-            console.warn("Hydra USDT subscribe failed:", e);
-            setUsdtLabel("USDT (Hydra)");
-            setUsdtBal("-");
-          }
-        }
-
-        setStatusN("Live balance (read-only)");
-      } catch (e: any) {
-        setStatusN(`RPC error: ${e?.message ?? String(e)}`);
-      }
-    }
-
-    connectAndSubscribe();
-
-    return () => {
-      cancelled = true;
-      try { if (unsubNative) unsubNative(); } catch {}
-      try { if (unsubUsdc) unsubUsdc(); } catch {}
-      try { if (unsubUsdt) unsubUsdt(); } catch {}
-      try { api?.disconnect(); } catch {}
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chain, selected]);
-
-  const edHelp =
-    chain === "assethub"
-      ? "ED matters for keeping the account alive on Asset Hub. Keep a DOT buffer."
-      : "ED is chain-specific and refers to the chain native token (shown above). Keep some for fees.";
+  const updatedLabel = useMemo(() => {
+    if (!lastUpdatedMs) return "—";
+    const d = new Date(lastUpdatedMs);
+    return d.toLocaleString();
+  }, [lastUpdatedMs]);
 
   return (
     <div
@@ -330,8 +119,8 @@ export function WalletPanel(props: {
 
       {!extEnabled && (
         <div style={{ marginBottom: 10, opacity: 0.8 }}>
-          Install/enable a Polkadot wallet extension (polkadot{".js"}, Talisman, SubWallet, etc.) and
-          authorize this site.
+          Install/enable a Polkadot wallet extension (polkadot{".js"}, Talisman,
+          SubWallet, etc.) and authorize this site.
         </div>
       )}
 
@@ -341,7 +130,9 @@ export function WalletPanel(props: {
       {accounts.length > 0 && (
         <>
           <label>
-            <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>Account</div>
+            <div style={{ fontSize: 13, opacity: 0.7, marginBottom: 6 }}>
+              Account
+            </div>
             <select
               value={selected}
               onChange={(e) => setSelected(e.target.value)}
@@ -355,22 +146,116 @@ export function WalletPanel(props: {
             </select>
           </label>
 
-          <div style={{ marginTop: 12, display: "grid", gap: 6 }}>
-            <div><b>Chain:</b> {chain}</div>
-            <div><b>{nativeSymbol} (free):</b> {nativeBal}</div>
-            <div><b>Existential Deposit (ED):</b> {nativeEd} <span style={{ opacity: 0.6 }}>(native)</span></div>
-
-            <div><b>{usdcLabel}:</b> {usdcBal}</div>
-            <div><b>{usdtLabel}:</b> {usdtBal}</div>
-          </div>
-
-          <div style={{ marginTop: 10, fontSize: 13, opacity: 0.7 }}>{edHelp}</div>
-
-          <div style={{ marginTop: 12, fontSize: 13, opacity: 0.7 }}>
-            Selected: {selectedAccount?.name ?? "Account"} ({selected.slice(0, 10)}…)
+          <div style={{ marginTop: 12, fontSize: 13, opacity: 0.75 }}>
+            Selected: {selectedAccount?.name ?? "Account"} ({selected.slice(0, 10)}
+            …)
           </div>
         </>
       )}
+
+      {/* Portfolio snapshot */}
+      <div style={{ marginTop: 18 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <h3 style={{ margin: 0 }}>Multi-chain snapshot</h3>
+          <span style={{ fontSize: 12, opacity: 0.7 }}>
+            Last update: {updatedLabel}
+          </span>
+          {onRefresh && (
+            <button
+              onClick={onRefresh}
+              style={{
+                marginLeft: "auto",
+                padding: "8px 10px",
+                borderRadius: 8,
+                border: "1px solid #ddd",
+                background: "#fff",
+                cursor: "pointer",
+                fontSize: 13,
+              }}
+            >
+              Refresh
+            </button>
+          )}
+        </div>
+
+        <div style={{ marginTop: 10, overflowX: "auto" }}>
+          <table
+            style={{
+              width: "100%",
+              borderCollapse: "collapse",
+              fontSize: 13,
+            }}
+          >
+            <thead>
+              <tr style={{ textAlign: "left" }}>
+                <th style={{ padding: "8px 6px", borderBottom: "1px solid #eee" }}>
+                  Chain
+                </th>
+                <th style={{ padding: "8px 6px", borderBottom: "1px solid #eee" }}>
+                  Native
+                </th>
+                <th style={{ padding: "8px 6px", borderBottom: "1px solid #eee" }}>
+                  Free
+                </th>
+                <th style={{ padding: "8px 6px", borderBottom: "1px solid #eee" }}>
+                  ED
+                </th>
+                <th style={{ padding: "8px 6px", borderBottom: "1px solid #eee" }}>
+                  USDC
+                </th>
+                <th style={{ padding: "8px 6px", borderBottom: "1px solid #eee" }}>
+                  USDT
+                </th>
+                <th style={{ padding: "8px 6px", borderBottom: "1px solid #eee" }}>
+                  Status
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {snapshots.map((s) => {
+                const usdc = s.tokens?.USDC;
+                const usdt = s.tokens?.USDT;
+                const badge = statusBadge(s.ok, s.error);
+
+                return (
+                  <tr key={s.chain}>
+                    <td style={{ padding: "8px 6px", borderBottom: "1px solid #f4f4f4" }}>
+                      {chainLabel(s.chain)}
+                    </td>
+                    <td style={{ padding: "8px 6px", borderBottom: "1px solid #f4f4f4" }}>
+                      {s.nativeSymbol}
+                    </td>
+                    <td style={{ padding: "8px 6px", borderBottom: "1px solid #f4f4f4" }}>
+                      {fmt6(s.nativeFree)}
+                    </td>
+                    <td style={{ padding: "8px 6px", borderBottom: "1px solid #f4f4f4" }}>
+                      {fmt6(s.ed)}
+                    </td>
+                    <td style={{ padding: "8px 6px", borderBottom: "1px solid #f4f4f4" }}>
+                      {usdc ? fmt6(usdc) : "—"}
+                    </td>
+                    <td style={{ padding: "8px 6px", borderBottom: "1px solid #f4f4f4" }}>
+                      {usdt ? fmt6(usdt) : "—"}
+                    </td>
+                    <td style={{ padding: "8px 6px", borderBottom: "1px solid #f4f4f4" }}>
+                      <span style={badge.style}>{badge.text}</span>
+                      {!s.ok && s.error && (
+                        <span style={{ marginLeft: 8, opacity: 0.7 }}>
+                          {s.error}
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
+          Snapshot is best-effort: balances may change between refresh and signing.
+        </div>
+      </div>
     </div>
   );
 }
