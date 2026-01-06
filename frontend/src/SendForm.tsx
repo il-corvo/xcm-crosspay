@@ -5,6 +5,7 @@ import { validateRequest } from "../../xcm-engine/validate";
 const CHAINS = [
   { key: "assethub", name: "Polkadot Asset Hub" },
   { key: "relay", name: "Polkadot Relay" },
+  { key: "people", name: "People" },
   { key: "hydradx", name: "HydraDX" },
 ] as const;
 
@@ -31,8 +32,9 @@ export function SendForm(props: {
 
   advancedDotEnabled: boolean;
 
-  // NEW: relay bootstrap info
   relayNote?: string;
+  peopleNote?: string;
+
   hideServiceFee?: boolean;
 }) {
   const {
@@ -52,10 +54,13 @@ export function SendForm(props: {
     modeLabel,
     advancedDotEnabled: _advancedDotEnabled,
     relayNote,
+    peopleNote,
     hideServiceFee,
   } = props;
 
   const errors = validateRequest(value);
+
+  const isDot = value.asset === "DOT";
 
   const assetOptions =
     value.from === "assethub"
@@ -64,43 +69,100 @@ export function SendForm(props: {
           { key: "USDC_AH", label: "USDC (Asset Hub)" },
           { key: "USDT_AH", label: "USDT (Asset Hub)" },
         ]
-      : value.from === "relay"
+      : value.from === "relay" || value.from === "people"
       ? [{ key: "DOT", label: "DOT" }]
       : [
           { key: "USDC_HYDRA", label: "USDC (Hydra)" },
           { key: "USDT_HYDRA", label: "USDT (Hydra)" },
         ];
 
-  const toOptions =
-    value.asset === "DOT"
-      ? value.from === "assethub"
-        ? [{ key: "relay", name: "Polkadot Relay" }]
-        : value.from === "relay"
-        ? [{ key: "assethub", name: "Polkadot Asset Hub" }]
-        : []
-      : value.from === "assethub"
-      ? [{ key: "hydradx", name: "HydraDX" }]
-      : value.from === "hydradx"
+  // To options
+  // - DOT: AssetHub -> (Relay or People), Relay -> AssetHub, People -> AssetHub
+  // - Stablecoins: AssetHub <-> Hydra only
+  const toOptions = isDot
+    ? value.from === "assethub"
+      ? [
+          { key: "relay", name: "Polkadot Relay" },
+          { key: "people", name: "People" },
+        ]
+      : value.from === "relay"
       ? [{ key: "assethub", name: "Polkadot Asset Hub" }]
-      : [];
+      : value.from === "people"
+      ? [{ key: "assethub", name: "Polkadot Asset Hub" }]
+      : []
+    : value.from === "assethub"
+    ? [{ key: "hydradx", name: "HydraDX" }]
+    : value.from === "hydradx"
+    ? [{ key: "assethub", name: "Polkadot Asset Hub" }]
+    : [];
 
   return (
-    <div style={{ border: "1px solid #e5e5e5", borderRadius: 12, padding: 16, background: "#fff", marginTop: 20 }}>
+    <div
+      style={{
+        border: "1px solid #e5e5e5",
+        borderRadius: 12,
+        padding: 16,
+        background: "#fff",
+        marginTop: 20,
+      }}
+    >
       <h2 style={{ marginTop: 0 }}>Send</h2>
 
-      <div style={{ marginTop: 10, border: "1px solid #eaeaea", background: "#fafafa", padding: 10, borderRadius: 10, fontSize: 13 }}>
+      <div
+        style={{
+          marginTop: 10,
+          border: "1px solid #eaeaea",
+          background: "#fafafa",
+          padding: 10,
+          borderRadius: 10,
+          fontSize: 13,
+        }}
+      >
         <b>Mode:</b> {modeLabel}
       </div>
 
       {warning && (
-        <div style={{ marginTop: 10, border: "1px solid #ffe2a8", background: "#fff8e6", padding: 12, borderRadius: 10, fontSize: 13 }}>
+        <div
+          style={{
+            marginTop: 10,
+            border: "1px solid #ffe2a8",
+            background: "#fff8e6",
+            padding: 12,
+            borderRadius: 10,
+            fontSize: 13,
+          }}
+        >
           <b>Note:</b> {warning}
         </div>
       )}
 
       {relayNote && (
-        <div style={{ marginTop: 10, border: "1px solid #cfe6ff", background: "#eef6ff", padding: 12, borderRadius: 10, fontSize: 13 }}>
+        <div
+          style={{
+            marginTop: 10,
+            border: "1px solid #cfe6ff",
+            background: "#eef6ff",
+            padding: 12,
+            borderRadius: 10,
+            fontSize: 13,
+          }}
+        >
           <b>Relay bootstrap:</b> {relayNote}
+        </div>
+      )}
+
+      {peopleNote && (
+        <div
+          style={{
+            marginTop: 10,
+            border: "1px solid #d9f5d9",
+            background: "#f0fff0",
+            padding: 12,
+            borderRadius: 10,
+            fontSize: 13,
+          }}
+        >
+          <b>People bootstrap:</b> {peopleNote}
         </div>
       )}
 
@@ -112,14 +174,17 @@ export function SendForm(props: {
             onChange={(e) => {
               const nextFrom = e.target.value as any;
 
+              // Keep asset valid when switching chain
               let nextAsset = value.asset;
-              if (nextFrom === "relay") nextAsset = "DOT";
+              if (nextFrom === "relay" || nextFrom === "people") nextAsset = "DOT";
               if (nextFrom === "hydradx" && nextAsset === "DOT") nextAsset = "USDC_HYDRA";
               if (nextFrom === "assethub" && nextAsset === "USDC_HYDRA") nextAsset = "USDC_AH";
 
+              // Auto-adjust destination
               let nextTo = value.to;
               if (nextAsset === "DOT") {
-                nextTo = nextFrom === "relay" ? "assethub" : "relay";
+                if (nextFrom === "relay" || nextFrom === "people") nextTo = "assethub";
+                else nextTo = "relay"; // default to relay
               } else {
                 nextTo = nextFrom === "hydradx" ? "assethub" : "hydradx";
               }
@@ -160,7 +225,8 @@ export function SendForm(props: {
               let nextTo = value.to;
 
               if (nextAsset === "DOT") {
-                nextTo = value.from === "relay" ? "assethub" : "relay";
+                if (value.from === "relay" || value.from === "people") nextTo = "assethub";
+                else nextTo = "relay";
               } else {
                 nextTo = value.from === "hydradx" ? "assethub" : "hydradx";
               }
@@ -190,7 +256,15 @@ export function SendForm(props: {
       </div>
 
       {errors.length > 0 && (
-        <div style={{ marginTop: 14, border: "1px solid #f0c9c9", background: "#fff6f6", padding: 12, borderRadius: 10 }}>
+        <div
+          style={{
+            marginTop: 14,
+            border: "1px solid #f0c9c9",
+            background: "#fff6f6",
+            padding: 12,
+            borderRadius: 10,
+          }}
+        >
           <strong>Fix required</strong>
           <ul style={{ marginTop: 8 }}>
             {errors.map((e, i) => (
@@ -200,7 +274,15 @@ export function SendForm(props: {
         </div>
       )}
 
-      <div style={{ marginTop: 14, border: "1px solid #eaeaea", background: "#fafafa", padding: 12, borderRadius: 10 }}>
+      <div
+        style={{
+          marginTop: 14,
+          border: "1px solid #eaeaea",
+          background: "#fafafa",
+          padding: 12,
+          borderRadius: 10,
+        }}
+      >
         <strong>Fees</strong>
 
         <div style={{ marginTop: 8, display: "grid", gap: 4 }}>
@@ -222,7 +304,11 @@ export function SendForm(props: {
         {!hideServiceFee && (
           <div style={{ marginTop: 12 }}>
             <label style={{ display: "flex", gap: 10, alignItems: "center" }}>
-              <input type="checkbox" checked={serviceFeeEnabled} onChange={(e) => onToggleServiceFee(e.target.checked)} />
+              <input
+                type="checkbox"
+                checked={serviceFeeEnabled}
+                onChange={(e) => onToggleServiceFee(e.target.checked)}
+              />
               <span>Include service fee (default on)</span>
             </label>
 
@@ -237,7 +323,15 @@ export function SendForm(props: {
 
       <button
         disabled={!canPreview}
-        style={{ marginTop: 14, width: "100%", padding: 12, borderRadius: 10, border: "none", cursor: canPreview ? "pointer" : "not-allowed", opacity: canPreview ? 1 : 0.5 }}
+        style={{
+          marginTop: 14,
+          width: "100%",
+          padding: 12,
+          borderRadius: 10,
+          border: "none",
+          cursor: canPreview ? "pointer" : "not-allowed",
+          opacity: canPreview ? 1 : 0.5,
+        }}
         onClick={onDryRun}
       >
         {canPreview ? "Preview XCM (dry-run)" : "Fix fields / wallet safety to continue"}
@@ -245,7 +339,17 @@ export function SendForm(props: {
 
       <button
         disabled={!canSubmitReal}
-        style={{ marginTop: 10, width: "100%", padding: 12, borderRadius: 10, border: "1px solid #111", background: canSubmitReal ? "#111" : "#777", color: "#fff", cursor: canSubmitReal ? "pointer" : "not-allowed", opacity: canSubmitReal ? 1 : 0.7 }}
+        style={{
+          marginTop: 10,
+          width: "100%",
+          padding: 12,
+          borderRadius: 10,
+          border: "1px solid #111",
+          background: canSubmitReal ? "#111" : "#777",
+          color: "#fff",
+          cursor: canSubmitReal ? "pointer" : "not-allowed",
+          opacity: canSubmitReal ? 1 : 0.7,
+        }}
         onClick={onSubmitReal}
       >
         Submit (REAL)
@@ -254,7 +358,17 @@ export function SendForm(props: {
       <div style={{ marginTop: 8, fontSize: 13, opacity: 0.7 }}>{submitHelp}</div>
 
       {dryRun && (
-        <div style={{ marginTop: 20, padding: 12, borderRadius: 10, background: "#0b0b0b", color: "#e6e6e6", fontSize: 13, overflowX: "auto" }}>
+        <div
+          style={{
+            marginTop: 20,
+            padding: 12,
+            borderRadius: 10,
+            background: "#0b0b0b",
+            color: "#e6e6e6",
+            fontSize: 13,
+            overflowX: "auto",
+          }}
+        >
           <strong>XCM dry-run preview</strong>
           <pre style={{ marginTop: 10 }}>{JSON.stringify(dryRun, null, 2)}</pre>
         </div>
