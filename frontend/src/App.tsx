@@ -16,7 +16,12 @@ import { ApiPromise, WsProvider } from "@polkadot/api";
 import { web3FromAddress } from "@polkadot/extension-dapp";
 import { decodeAddress } from "@polkadot/util-crypto";
 
+import { probeAllChains } from "./engine/balances";
+import type { ChainBalanceSnapshot, ProbeConfig } from "./engine/balances";
+
 const DOT_DECIMALS = 10;
+
+// ------------------ helpers ------------------
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -45,13 +50,6 @@ function parseDecimalToInt(amount: string, decimals: number): bigint {
   const fracInt = BigInt(frac || "0");
   const base = 10n ** BigInt(decimals);
   return whole * base + fracInt;
-}
-
-function fmtPlanckToDot(planck: bigint): string {
-  const s = planck.toString().padStart(DOT_DECIMALS + 1, "0");
-  const whole = s.slice(0, -DOT_DECIMALS);
-  const frac = s.slice(-DOT_DECIMALS).replace(/0+$/, "");
-  return frac ? `${whole}.${frac}` : whole;
 }
 
 function makeFeeQuoteNoService(networkFeeDotEst: number): FeeQuote {
@@ -90,7 +88,9 @@ async function connectApiWithFallback(
     }
   }
 
-  throw new Error(`All RPC endpoints failed. Last error: ${lastErr?.message ?? String(lastErr)}`);
+  throw new Error(
+    `All RPC endpoints failed. Last error: ${lastErr?.message ?? String(lastErr)}`
+  );
 }
 
 function logFinalizedEvents(
@@ -105,48 +105,52 @@ function logFinalizedEvents(
       const sec = event.section;
       const met = event.method;
 
-      if (sec === "polkadotXcm" && met === "Attempted") {
-        let payload = "";
-        try {
-          payload = JSON.stringify(event.toHuman(), null, 2);
-        } catch {
-          payload = event.toString();
-        }
-        lines.push(`*** polkadotXcm.Attempted ***\n${payload}`);
-      } else if (
+      const interesting =
         sec === "polkadotXcm" ||
+        sec === "xcmPallet" ||
         sec === "xcmpQueue" ||
         sec === "messageQueue" ||
         sec === "dmpQueue" ||
         sec === "balances" ||
         sec === "assets" ||
         sec === "tokens" ||
-        sec === "system" ||
-        sec === "xcmPallet"
-      ) {
-        let payload = "";
+        sec === "system";
+
+      if (!interesting) continue;
+
+      let payload = "";
+      try {
+        payload = JSON.stringify(event.toHuman());
+      } catch {
+        payload = event.toString();
+      }
+
+      // keep system noise low
+      if (sec === "system" && met !== "ExtrinsicSuccess" && met !== "ExtrinsicFailed")
+        continue;
+
+      if (sec === "polkadotXcm" && met === "Attempted") {
+        let p2 = "";
         try {
-          payload = JSON.stringify(event.toHuman());
+          p2 = JSON.stringify(event.toHuman(), null, 2);
         } catch {
-          payload = event.toString();
+          p2 = event.toString();
         }
-        if (sec === "system" && met !== "ExtrinsicSuccess" && met !== "ExtrinsicFailed") continue;
+        lines.push(`*** polkadotXcm.Attempted ***\n${p2}`);
+      } else {
         lines.push(`${sec}.${met}: ${payload}`);
       }
     }
 
     if (lines.length) {
-      setLog((s) => s + `\n--- EVENTS (finalized) ---\n${lines.join("\n")}\n--- END EVENTS ---\n`);
+      setLog(
+        (s) => s + `\n--- EVENTS (finalized) ---\n${lines.join("\n")}\n--- END EVENTS ---\n`
+      );
     }
   } catch {}
 }
 
-type ChainProbe = {
-  free: bigint;
-  ed: bigint;
-  ok: boolean;
-  lastUpdatedMs: number;
-};
+// ------------------ App ------------------
 
 export default function App() {
   const buildSha = import.meta.env.VITE_BUILD_SHA ?? "dev";
@@ -166,9 +170,12 @@ export default function App() {
   const [submitLog, setSubmitLog] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
 
-  const [relayProbe, setRelayProbe] = useState<ChainProbe | null>(null);
-  const [peopleProbe, setPeopleProbe] = useState<ChainProbe | null>(null);
+  // portfolio snapshot
+  const [snapshots, setSnapshots] = useState<ChainBalanceSnapshot[]>([]);
+  const [snapUpdatedMs, setSnapUpdatedMs] = useState<number | undefined>(undefined);
+  const [snapLoading, setSnapLoading] = useState(false);
 
+  // ---- guarded request (From != To) ----
   const guardedReq = useMemo<TransferRequest>(() => {
     if (req.from !== req.to) return req;
     const nextTo: TransferRequest["to"] =
@@ -178,23 +185,17 @@ export default function App() {
 
   const errors = useMemo(() => validateRequest(guardedReq), [guardedReq]);
 
+  // ---- snapshots shortcuts ----
+  const relaySnap = snapshots.find((s) => s.chain === "relay");
+  const peopleSnap = snapshots.find((s) => s.chain === "people");
+
+  // ---- fee quote ----
   const isRelayMode = guardedReq.from === "relay" || guardedReq.to === "relay";
   const isPeopleMode = guardedReq.from === "people" || guardedReq.to === "people";
-  const isTeleportDot =
-    guardedReq.asset === "DOT" && (isRelayMode || isPeopleMode);
+  const isTeleportDot = guardedReq.asset === "DOT" && (isRelayMode || isPeopleMode);
 
-  const isAhToRelayDot =
-    guardedReq.from === "assethub" &&
-    guardedReq.to === "relay" &&
-    guardedReq.asset === "DOT";
-
-  const isAhToPeopleDot =
-    guardedReq.from === "assethub" &&
-    guardedReq.to === "people" &&
-    guardedReq.asset === "DOT";
-
-  // Fee quote: teleport modes are on-chain and we hide service fee
   const networkFeeDotEst = 0.012;
+
   const feeQuote = useMemo<FeeQuote>(() => {
     if (isTeleportDot) {
       return {
@@ -207,13 +208,15 @@ export default function App() {
         ],
       };
     }
+
     if (!serviceFeeEnabled) return makeFeeQuoteNoService(networkFeeDotEst);
+
     const q = quoteFeesDot(0, networkFeeDotEst, DEFAULT_SERVICE_FEE);
     q.notes = [...q.notes, "Service fee toggle is informational (not collected on-chain)."];
     return q;
   }, [isTeleportDot, serviceFeeEnabled]);
 
-  // ---- AssetKey -> Guard Asset mapping ----
+  // ---- guard mapping ----
   const guardAsset =
     guardedReq.asset === "USDC_AH" || guardedReq.asset === "USDC_HYDRA"
       ? "USDC"
@@ -227,141 +230,130 @@ export default function App() {
     asset: guardAsset as any,
     amount: Number(guardedReq.amount || "0"),
 
-    relayFreeDot: relayProbe ? Number(fmtPlanckToDot(relayProbe.free)) : undefined,
-    relayEDDot: relayProbe ? Number(fmtPlanckToDot(relayProbe.ed)) : undefined,
+    relayFreeDot: relaySnap?.nativeFree ? Number(relaySnap.nativeFree) : undefined,
+    relayEDDot: relaySnap?.ed ? Number(relaySnap.ed) : undefined,
 
-    // People bootstrap inputs (safe even if guard.ts doesn't type them yet)
-    peopleFreeDot: peopleProbe ? Number(fmtPlanckToDot(peopleProbe.free)) : undefined,
-    peopleEDDot: peopleProbe ? Number(fmtPlanckToDot(peopleProbe.ed)) : undefined,
+    peopleFreeDot: peopleSnap?.nativeFree ? Number(peopleSnap.nativeFree) : undefined,
+    peopleEDDot: peopleSnap?.ed ? Number(peopleSnap.ed) : undefined,
   } as any);
 
   const warning = !guard.ok ? guard.reason : undefined;
   const canPreview = errors.length === 0 && guard.ok;
 
+  // ---- route support ----
+  const supportsAhToHydraStable =
+    guardedReq.from === "assethub" &&
+    guardedReq.to === "hydradx" &&
+    (guardedReq.asset === "USDC_AH" || guardedReq.asset === "USDT_AH");
+
+  const supportsHydraToAhStable =
+    guardedReq.from === "hydradx" &&
+    guardedReq.to === "assethub" &&
+    (guardedReq.asset === "USDC_HYDRA" || guardedReq.asset === "USDT_HYDRA");
+
+  const supportsAhToRelayDot =
+    guardedReq.from === "assethub" &&
+    guardedReq.to === "relay" &&
+    guardedReq.asset === "DOT";
+
+  const supportsRelayToAhDot =
+    guardedReq.from === "relay" &&
+    guardedReq.to === "assethub" &&
+    guardedReq.asset === "DOT";
+
+  const supportsAhToPeopleDot =
+    guardedReq.from === "assethub" &&
+    guardedReq.to === "people" &&
+    guardedReq.asset === "DOT";
+
+  const supportsPeopleToAhDot =
+    guardedReq.from === "people" &&
+    guardedReq.to === "assethub" &&
+    guardedReq.asset === "DOT";
+
+  const supportedAny =
+    supportsAhToHydraStable ||
+    supportsHydraToAhStable ||
+    supportsAhToRelayDot ||
+    supportsRelayToAhDot ||
+    supportsAhToPeopleDot ||
+    supportsPeopleToAhDot;
+
   const canSubmitReal =
-    !submitting &&
-    errors.length === 0 &&
-    guard.ok;
+    !submitting && errors.length === 0 && guard.ok && supportedAny && !!selectedAddress;
 
-  // Safety message
-const safetyMsg = isTeleportDot
-  ? "Teleport note: fees are on-chain and small amounts may be consumed by execution. Bootstrap destination above ED when needed."
-  : "See the multi-chain wallet snapshot above for balances and ED.";
-
-  // Relay note
-  const relayNote = useMemo(() => {
-    if (!isAhToRelayDot) return undefined;
-    if (!relayProbe) return "Reading Relay balance/ED…";
-
-    const free = fmtPlanckToDot(relayProbe.free);
-    const ed = fmtPlanckToDot(relayProbe.ed);
-
-    if (typeof guard.minRequired === "number" && relayProbe.free < relayProbe.ed) {
-      return `Relay free ≈ ${free} DOT (ED ≈ ${ed}). Minimum required now ≈ ${guard.minRequired.toFixed(4)} DOT.`;
-    }
-    return `Relay free ≈ ${free} DOT (ED ≈ ${ed}).`;
-  }, [isAhToRelayDot, relayProbe, guard.minRequired]);
-
-  // People note
-  const peopleNote = useMemo(() => {
-    if (!isAhToPeopleDot) return undefined;
-    if (!peopleProbe) return "Reading People balance/ED…";
-
-    const free = fmtPlanckToDot(peopleProbe.free);
-    const ed = fmtPlanckToDot(peopleProbe.ed);
-
-    if (typeof guard.minRequired === "number" && peopleProbe.free < peopleProbe.ed) {
-      return `People free ≈ ${free} DOT (ED ≈ ${ed}). Minimum required now ≈ ${guard.minRequired.toFixed(4)} DOT.`;
-    }
-    return `People free ≈ ${free} DOT (ED ≈ ${ed}).`;
-  }, [isAhToPeopleDot, peopleProbe, guard.minRequired]);
-
-  // Mode label
   const modeLabel =
-    guardedReq.asset === "DOT" && guardedReq.from === "assethub" && guardedReq.to === "relay"
-      ? "Asset Hub → Relay (DOT teleport)"
-      : guardedReq.asset === "DOT" && guardedReq.from === "relay" && guardedReq.to === "assethub"
-      ? "Relay → Asset Hub (DOT teleport)"
-      : guardedReq.asset === "DOT" && guardedReq.from === "assethub" && guardedReq.to === "people"
-      ? "Asset Hub → People (DOT teleport)"
-      : guardedReq.asset === "DOT" && guardedReq.from === "people" && guardedReq.to === "assethub"
-      ? "People → Asset Hub (DOT teleport)"
-      : guardedReq.from === "assethub"
-      ? "Asset Hub → HydraDX (reserve transfer)"
-      : guardedReq.from === "hydradx"
-      ? "HydraDX → Asset Hub (reserve transfer)"
-      : "Mode";
+    supportsAhToRelayDot ? "Asset Hub → Relay (DOT teleport)" :
+    supportsRelayToAhDot ? "Relay → Asset Hub (DOT teleport)" :
+    supportsAhToPeopleDot ? "Asset Hub → People (DOT teleport)" :
+    supportsPeopleToAhDot ? "People → Asset Hub (DOT teleport)" :
+    supportsAhToHydraStable ? "Asset Hub → HydraDX (reserve transfer)" :
+    supportsHydraToAhStable ? "HydraDX → Asset Hub (reserve transfer)" :
+    "Mode";
 
   const submitHelp =
-    isTeleportDot
-      ? "Teleport submit enabled when guards pass."
-      : "Reserve transfer submit enabled when guards pass.";
+    supportsAhToHydraStable ? "Real submit: stablecoin Asset Hub → HydraDX." :
+    supportsHydraToAhStable ? "Real submit: stablecoin HydraDX → Asset Hub." :
+    supportsAhToRelayDot ? "Real submit: DOT teleport Asset Hub → Relay." :
+    supportsRelayToAhDot ? "Real submit: DOT teleport Relay → Asset Hub (requires spendable DOT on Relay for fees)." :
+    supportsAhToPeopleDot ? "Real submit: DOT teleport Asset Hub → People." :
+    supportsPeopleToAhDot ? "Real submit: DOT teleport People → Asset Hub." :
+    "Unsupported route/asset.";
+
+  const safetyMsg = isTeleportDot
+    ? "Teleport note: fees are on-chain. Bootstrap destination above ED when needed."
+    : "See the multi-chain wallet snapshot above for balances and ED.";
 
   const onDryRun = () => setDryRun(buildXcmDryRun(guardedReq, feeQuote));
 
-  // RPC lists
+  // ---- probe config + refresh ----
+  const PROBE_CFG: ProbeConfig = {
+    timeoutMs: 8000,
+    rpcs: {
+      assethub: [
+        "wss://polkadot-asset-hub-rpc.polkadot.io",
+        "wss://rpc-asset-hub-polkadot.luckyfriday.io",
+        "wss://asset-hub-polkadot-rpc.dwellir.com",
+      ],
+      hydradx: ["wss://rpc.hydradx.cloud", "wss://hydradx-rpc.dwellir.com"],
+      relay: ["wss://rpc.polkadot.io", "wss://polkadot-rpc.dwellir.com"],
+      people: ["wss://polkadot-people-rpc.polkadot.io", "wss://people-polkadot-rpc.dwellir.com"],
+    },
+    assetHub: { usdcAssetId: 1337, usdtAssetId: 1984 },
+    hydra: { usdcAssetId: 22, usdtAssetId: 10, hdxSymbol: "HDX" },
+  };
+
+  async function refreshSnapshot(addr: string) {
+    setSnapLoading(true);
+    try {
+      const res = await probeAllChains(addr, PROBE_CFG);
+      setSnapshots(res);
+      setSnapUpdatedMs(Date.now());
+    } finally {
+      setSnapLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!selectedAddress) return;
+    refreshSnapshot(selectedAddress).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedAddress]);
+
+  // ---- RPC lists ----
   const ASSET_HUB_RPCS = [
-    "wss://polkadot-asset-hub-rpc.polkadot.io",
     "wss://rpc-asset-hub-polkadot.luckyfriday.io",
-    "wss://polkadot-asset-hub-rpc.polkadot.io/ws",
-    "wss://asset-hub-polkadot-rpc.dwellir.com",
-    "wss://asset-hub-polkadot-rpc.dwellir.com/ws",
+    "wss://polkadot-asset-hub-rpc.polkadot.io",
+    "wss://asset-hub-polkadot-rpc.dwellir.com", // last-ish
   ];
 
   const HYDRA_RPCS = ["wss://rpc.hydradx.cloud", "wss://hydradx-rpc.dwellir.com"];
 
   const RELAY_RPCS = ["wss://rpc.polkadot.io", "wss://polkadot-rpc.dwellir.com"];
 
-  const PEOPLE_RPCS = [
-    "wss://polkadot-people-rpc.polkadot.io",
-    "wss://people-polkadot-rpc.dwellir.com", // fallback (may be flaky)
-  ];
+  const PEOPLE_RPCS = ["wss://polkadot-people-rpc.polkadot.io", "wss://people-polkadot-rpc.dwellir.com"];
 
-  // Probe helper
-  async function probeChain(
-    rpcs: string[],
-    cacheKey: string,
-    setProbe: (p: ChainProbe | null) => void
-  ) {
-    let api: ApiPromise | null = null;
-    try {
-      const { api: chainApi } = await connectApiWithFallback(rpcs, () => {}, cacheKey);
-      api = chainApi;
-
-      const edStr = api.consts.balances?.existentialDeposit?.toString?.() ?? "0";
-      const ed = BigInt(edStr);
-
-      const info: any = await api.query.system.account(selectedAddress);
-      const free = BigInt(info.data.free.toString());
-
-      setProbe({ free, ed, ok: true, lastUpdatedMs: Date.now() });
-    } catch {
-      setProbe(null);
-    } finally {
-      try { api?.disconnect(); } catch {}
-    }
-  }
-
-  // Relay probe (AH->Relay DOT or from relay)
-  useEffect(() => {
-    if (!selectedAddress) return;
-    const need = isAhToRelayDot || guardedReq.from === "relay";
-    if (!need) return;
-    probeChain(RELAY_RPCS, "rpc_relay_last_ok", setRelayProbe);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedAddress, isAhToRelayDot, guardedReq.from]);
-
-  // People probe (AH->People DOT or from people)
-  useEffect(() => {
-    if (!selectedAddress) return;
-    const need = isAhToPeopleDot || guardedReq.from === "people";
-    if (!need) return;
-    probeChain(PEOPLE_RPCS, "rpc_people_last_ok", setPeopleProbe);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedAddress, isAhToPeopleDot, guardedReq.from]);
-
-  // ---- Tx builders ----
-
+  // ---- tx builders ----
   async function makeTxAhToHydra(api: ApiPromise) {
     const injector = await web3FromAddress(selectedAddress);
     api.setSigner(injector.signer);
@@ -373,6 +365,7 @@ const safetyMsg = isTeleportDot
     const beneficiary = { V3: { parents: 0, interior: { X1: { AccountId32: { network: null, id } } } } };
 
     const assetId = guardedReq.asset === "USDC_AH" ? 1337 : 1984;
+
     const md: any = await api.query.assets.metadata(assetId);
     const decimals: number = Number(md.decimals?.toString?.() ?? "6");
 
@@ -382,7 +375,12 @@ const safetyMsg = isTeleportDot
       V3: [
         {
           fun: { Fungible: amountInt.toString() },
-          id: { Concrete: { parents: 0, interior: { X2: [{ PalletInstance: 50 }, { GeneralIndex: String(assetId) }] } } },
+          id: {
+            Concrete: {
+              parents: 0,
+              interior: { X2: [{ PalletInstance: 50 }, { GeneralIndex: String(assetId) }] },
+            },
+          },
         },
       ],
     };
@@ -417,7 +415,11 @@ const safetyMsg = isTeleportDot
             Concrete: {
               parents: 1,
               interior: {
-                X3: [{ Parachain: ASSET_HUB_PARA }, { PalletInstance: 50 }, { GeneralIndex: generalIndex }],
+                X3: [
+                  { Parachain: ASSET_HUB_PARA },
+                  { PalletInstance: 50 },
+                  { GeneralIndex: generalIndex },
+                ],
               },
             },
           },
@@ -428,40 +430,29 @@ const safetyMsg = isTeleportDot
     return api.tx.polkadotXcm.limitedReserveTransferAssets(dest as any, beneficiary as any, assets as any, 0, { Unlimited: null } as any);
   }
 
-  async function makeTxAhToTeleportPara(api: ApiPromise, paraId: number) {
+  async function makeTxAhToRelay(api: ApiPromise) {
     const injector = await web3FromAddress(selectedAddress);
     api.setSigner(injector.signer);
 
-    const dest = {
-      V4: {
-        parents: "1",
-        interior: { X1: [{ Parachain: String(paraId) }] },
-      },
-    };
+    const dest = { V4: { parents: "1", interior: "Here" } };
 
     const id = decodeAddress(selectedAddress);
     const beneficiary = {
-      V4: {
-        parents: "0",
-        interior: { X1: [{ AccountId32: { network: null, id } }] },
-      },
+      V4: { parents: "0", interior: { X1: [{ AccountId32: { network: null, id } }] } },
     };
 
     const amountInt = parseDecimalToInt(guardedReq.amount, DOT_DECIMALS);
 
     const assets = {
       V4: [
-        {
-          id: { parents: "1", interior: "Here" },
-          fun: { Fungible: amountInt.toString() },
-        },
+        { id: { parents: "1", interior: "Here" }, fun: { Fungible: amountInt.toString() } },
       ],
     };
 
     return api.tx.polkadotXcm.limitedTeleportAssets(dest as any, beneficiary as any, assets as any, "0" as any, "Unlimited" as any);
   }
 
-  async function makeTxRelayToAhTeleport(api: ApiPromise) {
+  async function makeTxRelayToAh(api: ApiPromise) {
     const injector = await web3FromAddress(selectedAddress);
     api.setSigner(injector.signer);
 
@@ -480,7 +471,6 @@ const safetyMsg = isTeleportDot
     const beneficiary = { V4: { parents: 0, interior: { X1: [{ AccountId32: { network: null, id } }] } } };
 
     const amountInt = parseDecimalToInt(guardedReq.amount, DOT_DECIMALS);
-
     const assets = { V4: [{ id: { parents: 0, interior: "Here" }, fun: { Fungible: amountInt.toString() } }] };
 
     if (pallet === "xcmPallet") {
@@ -489,7 +479,25 @@ const safetyMsg = isTeleportDot
     return (api.tx as any).polkadotXcm.limitedTeleportAssets(dest as any, beneficiary as any, assets as any, 0, "Unlimited" as any);
   }
 
-  async function makeTxPeopleToAhTeleport(api: ApiPromise) {
+  async function makeTxAhToPeople(api: ApiPromise) {
+    const injector = await web3FromAddress(selectedAddress);
+    api.setSigner(injector.signer);
+
+    // ParaID 1004 from your proven tx
+    const dest = { V4: { parents: "1", interior: { X1: [{ Parachain: "1004" }] } } };
+
+    const id = decodeAddress(selectedAddress);
+    const beneficiary = {
+      V4: { parents: "0", interior: { X1: [{ AccountId32: { network: null, id } }] } },
+    };
+
+    const amountInt = parseDecimalToInt(guardedReq.amount, DOT_DECIMALS);
+    const assets = { V4: [{ id: { parents: "1", interior: "Here" }, fun: { Fungible: amountInt.toString() } }] };
+
+    return api.tx.polkadotXcm.limitedTeleportAssets(dest as any, beneficiary as any, assets as any, "0" as any, "Unlimited" as any);
+  }
+
+  async function makeTxPeopleToAh(api: ApiPromise) {
     const injector = await web3FromAddress(selectedAddress);
     api.setSigner(injector.signer);
 
@@ -502,13 +510,13 @@ const safetyMsg = isTeleportDot
 
     if (!pallet) throw new Error("People runtime does not expose limitedTeleportAssets.");
 
-    const dest = { V4: { parents: 1, interior: { X1: [{ Parachain: 1000 }] } } }; // via relay
+    // From People, go up to relay (parents:1) then to parachain 1000
+    const dest = { V4: { parents: 1, interior: { X1: [{ Parachain: 1000 }] } } };
 
     const id = decodeAddress(selectedAddress);
     const beneficiary = { V4: { parents: 0, interior: { X1: [{ AccountId32: { network: null, id } }] } } };
 
     const amountInt = parseDecimalToInt(guardedReq.amount, DOT_DECIMALS);
-
     const assets = { V4: [{ id: { parents: 0, interior: "Here" }, fun: { Fungible: amountInt.toString() } }] };
 
     if (pallet === "xcmPallet") {
@@ -524,8 +532,7 @@ const safetyMsg = isTeleportDot
     try {
       if (!canPreview) throw new Error("Form is not safe/valid yet.");
 
-      // stablecoins
-      if (guardedReq.from === "assethub" && guardedReq.to === "hydradx" && (guardedReq.asset === "USDC_AH" || guardedReq.asset === "USDT_AH")) {
+      if (supportsAhToHydraStable) {
         const { api } = await connectApiWithFallback(ASSET_HUB_RPCS, setSubmitLog, "rpc_assethub_last_ok");
         const tx = await makeTxAhToHydra(api);
         setSubmitLog((s) => s + "Signing & submitting...\n");
@@ -538,7 +545,9 @@ const safetyMsg = isTeleportDot
             try { unsub(); } catch {}
             api.disconnect().catch(() => {});
             setSubmitting(false);
-          } else setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
+          } else {
+            setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
+          }
 
           if (result.dispatchError && !dispatchLogged) {
             dispatchLogged = true;
@@ -553,7 +562,7 @@ const safetyMsg = isTeleportDot
         return;
       }
 
-      if (guardedReq.from === "hydradx" && guardedReq.to === "assethub" && (guardedReq.asset === "USDC_HYDRA" || guardedReq.asset === "USDT_HYDRA")) {
+      if (supportsHydraToAhStable) {
         const { api } = await connectApiWithFallback(HYDRA_RPCS, setSubmitLog, "rpc_hydra_last_ok");
         const tx = await makeTxHydraToAh(api);
         setSubmitLog((s) => s + "Signing & submitting...\n");
@@ -566,7 +575,9 @@ const safetyMsg = isTeleportDot
             try { unsub(); } catch {}
             api.disconnect().catch(() => {});
             setSubmitting(false);
-          } else setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
+          } else {
+            setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
+          }
 
           if (result.dispatchError && !dispatchLogged) {
             dispatchLogged = true;
@@ -581,33 +592,22 @@ const safetyMsg = isTeleportDot
         return;
       }
 
-      // DOT teleports
-      if (guardedReq.asset === "DOT" && guardedReq.from === "assethub" && guardedReq.to === "relay") {
+      if (supportsAhToRelayDot) {
         const { api } = await connectApiWithFallback(ASSET_HUB_RPCS, setSubmitLog, "rpc_assethub_last_ok");
-        // Use dedicated relay teleport: paraId "Here" (we reuse existing relay teleport via 0? no)
-        // We'll just call the proven dest=Here relay template by passing paraId 0? Not correct.
-        // Instead: use explicit relay builder:
-        const relayTx = await (async () => {
-          const dest = { V4: { parents: "1", interior: "Here" } };
-          const id = decodeAddress(selectedAddress);
-          const beneficiary = { V4: { parents: "0", interior: { X1: [{ AccountId32: { network: null, id } }] } } };
-          const amountInt = parseDecimalToInt(guardedReq.amount, DOT_DECIMALS);
-          const assets = { V4: [{ id: { parents: "1", interior: "Here" }, fun: { Fungible: amountInt.toString() } }] };
-          const injector = await web3FromAddress(selectedAddress);
-          api.setSigner(injector.signer);
-          return api.tx.polkadotXcm.limitedTeleportAssets(dest as any, beneficiary as any, assets as any, "0" as any, "Unlimited" as any);
-        })();
-
+        const tx = await makeTxAhToRelay(api);
         setSubmitLog((s) => s + "Signing & submitting...\n");
+
         let dispatchLogged = false;
-        const unsub = await relayTx.signAndSend(selectedAddress, (result: any) => {
+        const unsub = await tx.signAndSend(selectedAddress, (result: any) => {
           if (result.status.isFinalized) {
             setSubmitLog((s) => s + `🎉 Finalized: ${result.status.asFinalized.toString()}\n`);
             logFinalizedEvents(result, setSubmitLog);
             try { unsub(); } catch {}
             api.disconnect().catch(() => {});
             setSubmitting(false);
-          } else setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
+          } else {
+            setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
+          }
 
           if (result.dispatchError && !dispatchLogged) {
             dispatchLogged = true;
@@ -622,11 +622,11 @@ const safetyMsg = isTeleportDot
         return;
       }
 
-      if (guardedReq.asset === "DOT" && guardedReq.from === "relay" && guardedReq.to === "assethub") {
+      if (supportsRelayToAhDot) {
         const { api } = await connectApiWithFallback(RELAY_RPCS, setSubmitLog, "rpc_relay_last_ok");
-        const tx = await makeTxRelayToAhTeleport(api);
-
+        const tx = await makeTxRelayToAh(api);
         setSubmitLog((s) => s + "Signing & submitting...\n");
+
         let dispatchLogged = false;
         const unsub = await tx.signAndSend(selectedAddress, (result: any) => {
           if (result.status.isFinalized) {
@@ -635,7 +635,9 @@ const safetyMsg = isTeleportDot
             try { unsub(); } catch {}
             api.disconnect().catch(() => {});
             setSubmitting(false);
-          } else setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
+          } else {
+            setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
+          }
 
           if (result.dispatchError && !dispatchLogged) {
             dispatchLogged = true;
@@ -650,11 +652,11 @@ const safetyMsg = isTeleportDot
         return;
       }
 
-      if (guardedReq.asset === "DOT" && guardedReq.from === "assethub" && guardedReq.to === "people") {
+      if (supportsAhToPeopleDot) {
         const { api } = await connectApiWithFallback(ASSET_HUB_RPCS, setSubmitLog, "rpc_assethub_last_ok");
-        const tx = await makeTxAhToTeleportPara(api, 1004);
-
+        const tx = await makeTxAhToPeople(api);
         setSubmitLog((s) => s + "Signing & submitting...\n");
+
         let dispatchLogged = false;
         const unsub = await tx.signAndSend(selectedAddress, (result: any) => {
           if (result.status.isFinalized) {
@@ -663,7 +665,9 @@ const safetyMsg = isTeleportDot
             try { unsub(); } catch {}
             api.disconnect().catch(() => {});
             setSubmitting(false);
-          } else setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
+          } else {
+            setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
+          }
 
           if (result.dispatchError && !dispatchLogged) {
             dispatchLogged = true;
@@ -678,11 +682,11 @@ const safetyMsg = isTeleportDot
         return;
       }
 
-      if (guardedReq.asset === "DOT" && guardedReq.from === "people" && guardedReq.to === "assethub") {
+      if (supportsPeopleToAhDot) {
         const { api } = await connectApiWithFallback(PEOPLE_RPCS, setSubmitLog, "rpc_people_last_ok");
-        const tx = await makeTxPeopleToAhTeleport(api);
-
+        const tx = await makeTxPeopleToAh(api);
         setSubmitLog((s) => s + "Signing & submitting...\n");
+
         let dispatchLogged = false;
         const unsub = await tx.signAndSend(selectedAddress, (result: any) => {
           if (result.status.isFinalized) {
@@ -691,7 +695,9 @@ const safetyMsg = isTeleportDot
             try { unsub(); } catch {}
             api.disconnect().catch(() => {});
             setSubmitting(false);
-          } else setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
+          } else {
+            setSubmitLog((s) => s + `Status: ${result.status.type}\n`);
+          }
 
           if (result.dispatchError && !dispatchLogged) {
             dispatchLogged = true;
@@ -713,8 +719,18 @@ const safetyMsg = isTeleportDot
     }
   }
 
-  // WalletPanel doesn't support relay/people yet: show AssetHub panel when those selected (temporary)
+  // Relay/People notes (bootstrap awareness)
+const relayNote =
+  supportsAhToRelayDot && relaySnap
+    ? `Relay free ≈ ${relaySnap.nativeFree} DOT (ED ≈ ${relaySnap.ed}).`
+    : undefined;
 
+const peopleNote =
+  supportsAhToPeopleDot && peopleSnap
+    ? `People free ≈ ${peopleSnap.nativeFree} DOT (ED ≈ ${peopleSnap.ed}).`
+    : undefined;
+
+  // ---- Render ----
   return (
     <div style={{ maxWidth: 840, margin: "40px auto", padding: "0 16px" }}>
       <header style={{ marginBottom: 24 }}>
@@ -724,13 +740,17 @@ const safetyMsg = isTeleportDot
         </p>
       </header>
 
-<WalletPanel
-  snapshots={[]}
-  lastUpdatedMs={undefined}
-  onRefresh={undefined}
-  onSelectedAddress={setSelectedAddress}
-onChainData={() => {}}
- />
+      <WalletPanel
+        snapshots={snapshots}
+        lastUpdatedMs={snapUpdatedMs}
+        onRefresh={
+          selectedAddress && !snapLoading
+            ? () => refreshSnapshot(selectedAddress)
+            : undefined
+        }
+        onSelectedAddress={setSelectedAddress}
+        onChainData={() => {}}
+      />
 
       <SendForm
         value={guardedReq}
