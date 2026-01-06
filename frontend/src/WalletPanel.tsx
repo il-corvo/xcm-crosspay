@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { web3Accounts, web3Enable } from "@polkadot/extension-dapp";
 
-import type { ChainBalanceSnapshot } from "../../xcm-engine/balances";
-
+import type { ChainBalanceSnapshot } from "./engine/balances";
 export type WalletChainData = {
   status: string;
 };
