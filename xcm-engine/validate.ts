@@ -9,7 +9,7 @@ export function validateRequest(req: TransferRequest): string[] {
     errs.push("Amount must be greater than zero.");
   }
 
-  const allowedChains = new Set(["assethub", "hydradx", "relay"]);
+  const allowedChains = new Set(["assethub", "hydradx", "relay", "people"]);
   if (!allowedChains.has(req.from) || !allowedChains.has(req.to)) {
     errs.push("Unsupported chain.");
   }

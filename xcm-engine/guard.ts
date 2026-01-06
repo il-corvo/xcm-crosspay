@@ -8,13 +8,13 @@ export type GuardInput = {
   asset: Asset;
   amount: number;
 
-  // Native token safety (if available)
-  fromNativeFree?: number;
-  fromNativeED?: number;
-
   // Relay bootstrap safety (dynamic)
   relayFreeDot?: number;
   relayEDDot?: number;
+
+  // People bootstrap safety (dynamic)
+  peopleFreeDot?: number;
+  peopleEDDot?: number;
 };
 
 export type GuardResult = {
@@ -37,62 +37,50 @@ function inRoutes(from: Chain, to: Chain, mode: RouteMode): boolean {
 export function guardRoute(input: GuardInput): GuardResult {
   const { from, to, asset, amount } = input;
 
-  if (from === to) {
-    return { ok: false, hardBlock: true, reason: "From and To must be different." };
-  }
-  if (!Number.isFinite(amount) || amount <= 0) {
-    return { ok: false, hardBlock: true, reason: "Amount must be greater than zero." };
-  }
+  if (from === to) return { ok: false, hardBlock: true, reason: "From and To must be different." };
+  if (!Number.isFinite(amount) || amount <= 0) return { ok: false, hardBlock: true, reason: "Amount must be greater than zero." };
 
-  // ----- Stablecoin reserve routes -----
+  // stablecoins
   if ((asset === "USDC" || asset === "USDT") && (from === "assethub" || from === "hydradx")) {
     const mode: RouteMode = "stable_reserve";
-    if (!inRoutes(from, to, mode)) {
-      return { ok: false, hardBlock: true, mode, reason: "Stablecoin route not supported in safe-mode." };
-    }
+    if (!inRoutes(from, to, mode)) return { ok: false, hardBlock: true, mode, reason: "Stablecoin route not supported in safe-mode." };
     if (amount < CAPABILITIES.stablecoin.minAmount) {
-      return {
-        ok: false,
-        hardBlock: true,
-        mode,
-        reason: `Minimum stablecoin amount is ${CAPABILITIES.stablecoin.minAmount.toFixed(2)}.`,
-      };
+      return { ok: false, hardBlock: true, mode, reason: `Minimum stablecoin amount is ${CAPABILITIES.stablecoin.minAmount.toFixed(2)}.` };
     }
     return { ok: true, hardBlock: false, mode };
   }
 
-  // ----- DOT teleport routes (AH <-> Relay) -----
-  if (asset === "DOT" && (from === "assethub" || from === "relay")) {
+  // DOT teleport
+  if (asset === "DOT" && (from === "assethub" || from === "relay" || from === "people")) {
     const mode: RouteMode = "dot_teleport";
-    if (!inRoutes(from, to, mode)) {
-      return { ok: false, hardBlock: true, mode, reason: "DOT teleport route not supported." };
-    }
+    if (!inRoutes(from, to, mode)) return { ok: false, hardBlock: true, mode, reason: "DOT teleport route not supported." };
     if (amount < CAPABILITIES.dotTeleport.minAmount) {
-      return {
-        ok: false,
-        hardBlock: true,
-        mode,
-        reason: `Minimum DOT teleport amount is ${CAPABILITIES.dotTeleport.minAmount.toFixed(2)}.`,
-      };
+      return { ok: false, hardBlock: true, mode, reason: `Minimum DOT teleport amount is ${CAPABILITIES.dotTeleport.minAmount.toFixed(2)}.` };
     }
 
-    // Dynamic relay bootstrap guard (your choice A):
-    // only when AH -> Relay and relay is below ED
+    // Dynamic bootstrap guard: buffers 0.01 + 0.05
+    const buffer = 0.01 + 0.05;
+
+    // AssetHub -> Relay
     if (from === "assethub" && to === "relay") {
       const rf = input.relayFreeDot;
       const red = input.relayEDDot;
-
       if (typeof rf === "number" && typeof red === "number" && rf < red) {
-        // buffers: 0.01 + 0.05 DOT
-        const minRequired = (red - rf) + 0.01 + 0.05;
+        const minRequired = (red - rf) + buffer;
         if (amount < minRequired) {
-          return {
-            ok: false,
-            hardBlock: true,
-            mode,
-            minRequired,
-            reason: `Relay account is below ED. Send at least ~${minRequired.toFixed(4)} DOT to bootstrap safely.`,
-          };
+          return { ok: false, hardBlock: true, mode, minRequired, reason: `Relay account is below ED. Send at least ~${minRequired.toFixed(4)} DOT to bootstrap safely.` };
+        }
+      }
+    }
+
+    // AssetHub -> People
+    if (from === "assethub" && to === "people") {
+      const pf = input.peopleFreeDot;
+      const ped = input.peopleEDDot;
+      if (typeof pf === "number" && typeof ped === "number" && pf < ped) {
+        const minRequired = (ped - pf) + buffer;
+        if (amount < minRequired) {
+          return { ok: false, hardBlock: true, mode, minRequired, reason: `People account is below ED. Send at least ~${minRequired.toFixed(4)} DOT to bootstrap safely.` };
         }
       }
     }
@@ -100,16 +88,11 @@ export function guardRoute(input: GuardInput): GuardResult {
     return { ok: true, hardBlock: false, mode };
   }
 
-  // ----- DOT advanced execute (AH -> Hydra) -----
+  // DOT advanced execute
   if (asset === "DOT" && from === "assethub" && to === "hydradx") {
     const mode: RouteMode = "dot_execute_advanced";
     if (amount < CAPABILITIES.dotExecuteAdvanced.minAmount || amount > CAPABILITIES.dotExecuteAdvanced.maxAmount) {
-      return {
-        ok: false,
-        hardBlock: true,
-        mode,
-        reason: `Advanced DOT execute supports ${CAPABILITIES.dotExecuteAdvanced.minAmount.toFixed(2)}–${CAPABILITIES.dotExecuteAdvanced.maxAmount.toFixed(2)} DOT.`,
-      };
+      return { ok: false, hardBlock: true, mode, reason: `Advanced DOT execute supports ${CAPABILITIES.dotExecuteAdvanced.minAmount.toFixed(2)}–${CAPABILITIES.dotExecuteAdvanced.maxAmount.toFixed(2)} DOT.` };
     }
     return { ok: true, hardBlock: false, mode, reason: "Advanced route enabled (experimental)." };
   }

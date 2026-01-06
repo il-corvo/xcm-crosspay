@@ -1,11 +1,11 @@
 // xcm-engine/capabilities.ts
-export type Chain = "assethub" | "hydradx" | "relay";
+export type Chain = "assethub" | "hydradx" | "relay" | "people";
 export type Asset = "DOT" | "USDC" | "USDT";
 
 export type RouteMode =
-  | "stable_reserve"        // USDC/USDT AH<->Hydra
-  | "dot_teleport"          // DOT AH<->Relay
-  | "dot_execute_advanced"; // DOT AH->Hydra via execute (opt-in)
+  | "stable_reserve"
+  | "dot_teleport"
+  | "dot_execute_advanced";
 
 export const CAPABILITIES = {
   stablecoin: {
@@ -20,8 +20,13 @@ export const CAPABILITIES = {
   dotTeleport: {
     assets: ["DOT"] as const,
     routes: [
+      // Relay
       { from: "assethub", to: "relay", mode: "dot_teleport" as const },
       { from: "relay", to: "assethub", mode: "dot_teleport" as const },
+
+      // People (para 1004)
+      { from: "assethub", to: "people", mode: "dot_teleport" as const },
+      { from: "people", to: "assethub", mode: "dot_teleport" as const },
     ],
     minAmount: 0.05,
   },

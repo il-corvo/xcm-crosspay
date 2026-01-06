@@ -1,4 +1,4 @@
-export type ChainKey = "assethub" | "hydradx" | "relay";
+export type ChainKey = "assethub" | "hydradx" | "relay" | "people";
 
 export type AssetKey =
   | "DOT"
