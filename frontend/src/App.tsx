@@ -4,7 +4,6 @@ import "./App.css";
 import { guardRoute } from "../../xcm-engine/guard";
 
 import { WalletPanel } from "./WalletPanel";
-import type { WalletChainData } from "./WalletPanel";
 import { SendForm } from "./SendForm";
 
 import type { TransferRequest, FeeQuote } from "../../xcm-engine/types";
@@ -161,7 +160,6 @@ export default function App() {
 
   const [serviceFeeEnabled, setServiceFeeEnabled] = useState(true);
 
-  const [wallet, setWallet] = useState<WalletChainData>({ status: "Not connected" });
   const [selectedAddress, setSelectedAddress] = useState<string>("");
 
   const [dryRun, setDryRun] = useState<XcmDryRun | undefined>(undefined);
@@ -246,12 +244,9 @@ export default function App() {
     guard.ok;
 
   // Safety message
-  const safetyMsg = isTeleportDot
-    ? "Teleport note: fees are on-chain and small amounts may be consumed by execution. Bootstrap the destination account above ED when needed."
-    : !Number.isFinite(Number(wallet.balanceDot ?? "NaN")) ||
-      !Number.isFinite(Number(wallet.edDot ?? "NaN"))
-    ? "Wallet data not ready yet."
-    : `OK: keep a native buffer above ED (${wallet.edDot}).`;
+const safetyMsg = isTeleportDot
+  ? "Teleport note: fees are on-chain and small amounts may be consumed by execution. Bootstrap destination above ED when needed."
+  : "See the multi-chain wallet snapshot above for balances and ED.";
 
   // Relay note
   const relayNote = useMemo(() => {
@@ -719,10 +714,6 @@ export default function App() {
   }
 
   // WalletPanel doesn't support relay/people yet: show AssetHub panel when those selected (temporary)
-  const walletChainForPanel =
-    guardedReq.from === "relay" || guardedReq.from === "people"
-      ? ("assethub" as any)
-      : (guardedReq.from as any);
 
   return (
     <div style={{ maxWidth: 840, margin: "40px auto", padding: "0 16px" }}>
@@ -733,11 +724,13 @@ export default function App() {
         </p>
       </header>
 
-      <WalletPanel
-        chain={walletChainForPanel}
-        onSelectedAddress={setSelectedAddress}
-        onChainData={(d) => setWallet((prev) => ({ ...prev, ...d }))}
-      />
+<WalletPanel
+  snapshots={[]}
+  lastUpdatedMs={undefined}
+  onRefresh={undefined}
+  onSelectedAddress={setSelectedAddress}
+onChainData={() => {}}
+ />
 
       <SendForm
         value={guardedReq}
