@@ -42,7 +42,8 @@ export function WalletPanel(props: {
   const [extEnabled, setExtEnabled] = useState(false);
   const [accounts, setAccounts] = useState<UiAccount[]>([]);
   const [selected, setSelected] = useState<string>("");
-  const [status, setStatus] = useState<string>("Not connected");
+const [userSelected, setUserSelected] = useState(false);  
+const [status, setStatus] = useState<string>("Not connected");
 
   const selectedAccount = useMemo(
     () => accounts.find((a) => a.address === selected),
@@ -75,12 +76,21 @@ export function WalletPanel(props: {
           name: a.meta?.name as string | undefined,
         }));
 
-        setAccounts(mapped);
-        const first = mapped[0]?.address ?? "";
-        setSelected(first);
-        onSelectedAddress(first);
-        setStatus(mapped.length ? "Wallet ready" : "No accounts found");
-        onChainData({ status: mapped.length ? "Wallet ready" : "No accounts" });
+setAccounts(mapped);
+
+setSelected((prev) => {
+  // se l'utente ha scelto manualmente, non toccare la selezione
+  if (userSelected && prev) return prev;
+
+  // se la selezione precedente esiste ancora, tienila
+  if (prev && mapped.some((a) => a.address === prev)) return prev;
+
+  // fallback: primo account
+  return mapped[0]?.address ?? "";
+});
+
+setStatus(mapped.length ? "Wallet ready" : "No accounts found");
+onChainData({ status: mapped.length ? "Wallet ready" : "No accounts" });
       } catch (e: any) {
         setStatus(`Wallet error: ${e?.message ?? String(e)}`);
         onChainData({ status: "Wallet error" });
@@ -134,7 +144,10 @@ export function WalletPanel(props: {
             </div>
             <select
               value={selected}
-              onChange={(e) => setSelected(e.target.value)}
+onChange={(e) => {
+  setUserSelected(true);
+  setSelected(e.target.value);
+}}
               style={{ width: "100%", padding: 10, borderRadius: 8 }}
             >
               {accounts.map((a) => (
